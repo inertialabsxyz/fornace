@@ -708,6 +708,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "clap",
+ "libc",
  "safetensors 0.8.0",
  "serde",
  "serde_json",
