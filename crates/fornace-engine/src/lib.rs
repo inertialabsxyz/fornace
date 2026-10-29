@@ -173,8 +173,6 @@ impl Engine {
         // output head from those tensors. You write none of the layers here.
         let model = ModelForCausalLM::new(&config, vb)?;
 
-        println!("Loaded model, memory: {} MB", gpu_mb(&device));
-
         Ok(Engine {
             model,
             tokenizer,
