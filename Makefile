@@ -1,4 +1,4 @@
-MODEL ?= ./models/qwen2.5-0.5b
+MODEL ?= ./models/qwen2.5-0.5b-instruct
 PROMPT ?= The capital of Spain is
 FEATURES ?= $(if $(filter Darwin,$(shell uname -s)),--features metal,)
 
