@@ -9,10 +9,6 @@ repository.workspace = true
 [features]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 
-[[bin]]
-name = "fornace"
-path = "src/bin/fornace.rs"
-
 [dependencies]
 libc = "0.2"
 candle-core.workspace = true
@@ -25,3 +21,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+textplots.workspace = true

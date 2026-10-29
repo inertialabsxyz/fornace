@@ -1,5 +1,7 @@
 //! The `fornace` command: load a model and generate text from a prompt.
 
+mod plot;
+
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -35,6 +37,9 @@ struct Args {
     /// Print the report as JSON instead of text.
     #[arg(long)]
     json: bool,
+    /// Draw the decode time of each token as a chart in the terminal.
+    #[arg(long, conflicts_with = "json")]
+    plot: bool,
     /// Out to file
     #[arg(long, value_name = "FILE")]
     out: Option<PathBuf>,
@@ -69,6 +74,10 @@ fn main() -> anyhow::Result<()> {
             report.time_to_first_token_ms
         );
         println!("peak RSS:             {} bytes", report.peak_rss_bytes);
+        if args.plot {
+            println!();
+            plot::decode_times(&report);
+        }
     }
     Ok(())
 }
