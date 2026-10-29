@@ -121,6 +121,14 @@ pub struct GenerationReport {
     pub text: String,
 }
 
+fn gpu_mb(dev: &Device) -> f64 {
+    match dev {
+        #[cfg(feature = "metal")]
+        Device::Metal(m) => m.device().current_allocated_size() as f64 / 1e6,
+        _ => 0.0,
+    }
+}
+
 /// A loaded model that generates text.
 #[derive(Debug)]
 pub struct Engine {
