@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::Parser;
 use fornace_engine::{DeviceKind, Dtype, Engine, LoadConfig};
 
@@ -34,6 +35,9 @@ struct Args {
     /// Print the report as JSON instead of text.
     #[arg(long)]
     json: bool,
+    /// Out to file
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -47,6 +51,10 @@ fn main() -> anyhow::Result<()> {
     };
     let mut engine = Engine::load(&config)?;
     let report = engine.generate(&args.prompt)?;
+    if let Some(path) = &args.out {
+        let json = serde_json::to_string_pretty(&report)?;
+        std::fs::write(path, json).with_context(|| format!("cannot write {}", path.display()))?;
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

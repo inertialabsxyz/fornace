@@ -31,7 +31,7 @@ build: ## Build the workspace in release mode
 	cargo build --workspace --release $(FEATURES)
 
 run: ## Generate text from PROMPT with the model in MODEL
-	cargo run --release $(FEATURES) -p fornace-engine --bin fornace -- --model $(MODEL) --prompt "$(PROMPT)"
+	cargo run --release $(FEATURES) -p fornace-engine --bin fornace -- --model $(MODEL) --prompt "$(PROMPT)" --max-new-tokens 1024 --json --out out.json
 
 bench: ## Run the benchmark harness on the model in MODEL
 	cargo run --release $(FEATURES) -p fornace-bench -- --model $(MODEL)

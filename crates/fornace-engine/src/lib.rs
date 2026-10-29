@@ -141,6 +141,7 @@ pub struct GenerationReport {
     pub time_to_first_token_ms: f64,
     pub peak_rss_bytes: u64,
     pub text: String,
+    pub decode_token_ms: Vec<f64>,
 }
 
 /// A loaded model that generates text.
@@ -214,7 +215,9 @@ impl Engine {
         let mut generated = Vec::new();
         generated.push(next);
 
+        let mut decode_token_ms = Vec::with_capacity(self.load_config.max_new_tokens);
         for (pos, _) in (ids.len() + 1..).zip(1..self.load_config.max_new_tokens) {
+            let step = Instant::now();
             // #3 Input tensor
             // We have a 1 dim [T] of tokens, we unsqueeze this to have [1, T]
             // [t0, t1, t2, tT-1] to [[t0, t1, t2, tT-1]]
@@ -234,7 +237,7 @@ impl Engine {
             )?;
             // #5 Sample
             next = sampler.sample(&logits)?;
-
+            decode_token_ms.push(step.elapsed().as_secs_f64() * 1e3);
             // #6 Next token is eos, stop
             if eos.contains(&Some(next)) {
                 break;
@@ -260,6 +263,7 @@ impl Engine {
             time_to_first_token_ms: first_token.as_secs_f64() * 1e3,
             peak_rss_bytes: peak_rss_bytes(),
             text,
+            decode_token_ms,
         })
     }
 }
