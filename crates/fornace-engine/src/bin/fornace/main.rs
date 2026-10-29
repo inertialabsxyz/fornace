@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
-use fornace_engine::{DeviceKind, Dtype, Engine, LoadConfig};
+use fornace_engine::{DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -46,6 +46,9 @@ struct Args {
     /// The number of sequences to generate at the same time.
     #[arg(long, value_name = "N", default_value_t = 1)]
     batch: usize,
+    /// The KV cache: cat (Candle's original), cat-contiguous, or prealloc.
+    #[arg(long, default_value = "prealloc")]
+    kv_cache: KvCacheKind,
     /// Print the report as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -93,6 +96,7 @@ fn main() -> anyhow::Result<()> {
         device: args.device,
         max_new_tokens: args.max_new_tokens,
         batch: args.batch,
+        kv_cache: args.kv_cache,
         sync_spans: args.trace.is_some(),
     };
     let mut engine = Engine::load(&config)?;

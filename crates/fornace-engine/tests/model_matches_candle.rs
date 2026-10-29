@@ -8,6 +8,7 @@ use std::path::Path;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::qwen2 as candle_qwen2;
+use fornace_engine::KvCacheKind;
 use fornace_engine::model as fornace_qwen2;
 use tokenizers::Tokenizer;
 
@@ -82,11 +83,20 @@ fn fornace_qwen2_matches_candle_qwen2() {
 
     let config: fornace_qwen2::Config = serde_json::from_slice(&config_json).unwrap();
     let mut fornace = fornace_qwen2::ModelForCausalLM::new(&config, vb, false).unwrap();
-    let (fornace_prefill, fornace_tokens) = run(|x, pos| fornace.forward(x, pos), &prompt, &device);
+    for kind in [
+        KvCacheKind::Cat,
+        KvCacheKind::CatContiguous,
+        KvCacheKind::Prealloc,
+    ] {
+        // A small capacity, so that the prealloc cache must also grow.
+        fornace.reset_kv_cache(kind, prompt.len() + 4);
+        let (fornace_prefill, fornace_tokens) =
+            run(|x, pos| fornace.forward(x, pos), &prompt, &device);
 
-    assert!(
-        fornace_prefill == candle_prefill,
-        "the prefill logits are different"
-    );
-    assert_eq!(fornace_tokens, candle_tokens);
+        assert!(
+            fornace_prefill == candle_prefill,
+            "{kind}: the prefill logits are different"
+        );
+        assert_eq!(fornace_tokens, candle_tokens, "{kind}");
+    }
 }

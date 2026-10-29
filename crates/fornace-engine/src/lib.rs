@@ -22,6 +22,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
 
+pub use crate::cache::KvCacheKind;
 use crate::metrics::peak_memory_bytes;
 use crate::model::{Config, ModelForCausalLM};
 use crate::trace::device_span;
@@ -129,6 +130,8 @@ pub struct LoadConfig {
     pub device: DeviceKind,
     pub max_new_tokens: usize,
     pub batch: usize,
+    /// How each attention layer stores earlier keys and values.
+    pub kv_cache: KvCacheKind,
     /// Wait for the device at the start and end of each span, so that spans
     /// measure GPU time. This makes generation slower. Use it only to trace.
     pub sync_spans: bool,
@@ -216,7 +219,6 @@ impl Engine {
     pub fn generate(&mut self, prompt: &str) -> Result<GenerationReport> {
         let sync = self.load_config.sync_spans;
         let _generate = device_span!(&self.device, sync, "generate")?;
-        self.model.clear_kv_cache();
         let start = Instant::now();
         // Tokenize prompt
         let ids = {
@@ -225,6 +227,10 @@ impl Engine {
                 .encode(prompt, true)
                 .map_err(Error::TokenEncoding)?
         };
+        self.model.reset_kv_cache(
+            self.load_config.kv_cache,
+            ids.len() + self.load_config.max_new_tokens,
+        );
         // End of sequence, ChatML
         let eos = [
             self.tokenizer.token_to_id("<|im_end|>"),

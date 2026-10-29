@@ -18,6 +18,7 @@ fn greedy_decode_names_the_capital_of_spain() {
         device: DeviceKind::Cpu,
         max_new_tokens: 8,
         batch: 1,
+        kv_cache: Default::default(),
         sync_spans: false,
     };
     let mut engine = Engine::load(&config).expect("load the engine");

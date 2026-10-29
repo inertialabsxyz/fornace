@@ -7,7 +7,9 @@
 //!
 //! - this header and the import paths;
 //! - DEBUG trace spans in the forward pass, and a `sync_spans` argument to
-//!   `ModelForCausalLM::new` and the constructors below it.
+//!   `ModelForCausalLM::new` and the constructors below it;
+//! - a choice of KV cache (`KvCacheKind`), set with `reset_kv_cache`. The
+//!   default, `Cat`, is the original code.
 //!
 //! The original documentation follows.
 //!
@@ -32,6 +34,7 @@ use candle_nn::{Activation, VarBuilder};
 use candle_transformers::models::with_tracing::{Linear, RmsNorm, linear, linear_no_bias};
 use std::sync::Arc;
 
+use crate::cache::{KvCacheKind, LayerCache};
 use crate::trace::device_debug_span;
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -138,7 +141,7 @@ struct Attention {
     head_dim: usize,
     hidden_size: usize,
     rotary_emb: Arc<RotaryEmbedding>,
-    kv_cache: Option<(Tensor, Tensor)>,
+    kv_cache: LayerCache,
     sync_spans: bool,
 }
 
@@ -169,7 +172,7 @@ impl Attention {
             head_dim,
             hidden_size: hidden_sz,
             rotary_emb,
-            kv_cache: None,
+            kv_cache: LayerCache::new(KvCacheKind::Cat, 0),
             sync_spans,
         })
     }
@@ -209,16 +212,7 @@ impl Attention {
 
         let (key_states, value_states) = {
             let _span = device_debug_span!(device, sync, "attn.kv_append")?;
-            let (key_states, value_states) = match &self.kv_cache {
-                None => (key_states, value_states),
-                Some((prev_k, prev_v)) => {
-                    let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
-                    let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
-                    (key_states, value_states)
-                }
-            };
-            self.kv_cache = Some((key_states.clone(), value_states.clone()));
-            (key_states, value_states)
+            self.kv_cache.append(key_states, value_states)?
         };
 
         let (key_states, value_states) = {
@@ -250,8 +244,8 @@ impl Attention {
             .apply(&self.o_proj)
     }
 
-    fn clear_kv_cache(&mut self) {
-        self.kv_cache = None
+    fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
+        self.kv_cache = LayerCache::new(kind, capacity)
     }
 }
 
@@ -309,8 +303,8 @@ impl DecoderLayer {
         residual + xs
     }
 
-    fn clear_kv_cache(&mut self) {
-        self.self_attn.clear_kv_cache()
+    fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
+        self.self_attn.reset_kv_cache(kind, capacity)
     }
 }
 
@@ -425,9 +419,12 @@ impl Model {
         xs.apply(&self.norm)
     }
 
-    pub fn clear_kv_cache(&mut self) {
+    /// Empties the KV cache of each layer and sets its kind. For
+    /// `KvCacheKind::Prealloc`, `capacity` is the number of positions to
+    /// allocate.
+    pub fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
         for layer in self.layers.iter_mut() {
-            layer.clear_kv_cache()
+            layer.reset_kv_cache(kind, capacity)
         }
     }
 }
@@ -469,7 +466,8 @@ impl ModelForCausalLM {
         xs.apply(&self.lm_head)
     }
 
-    pub fn clear_kv_cache(&mut self) {
-        self.base_model.clear_kv_cache()
+    /// See [`Model::reset_kv_cache`].
+    pub fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
+        self.base_model.reset_kv_cache(kind, capacity)
     }
 }
