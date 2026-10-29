@@ -22,3 +22,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 csv = "1.4.0"
 textplots = "0.8.7"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
+tracing-chrome = "0.7.2"
+memory-stats = "1.2.0"
