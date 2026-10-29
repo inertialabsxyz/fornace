@@ -5,17 +5,16 @@
 //! the device when it starts and when it ends, so that the span contains the
 //! GPU time of its own work and no other work.
 
-use candle_core::Device;
+use candle_core::{Device, Result};
 use tracing::span::EnteredSpan;
 
-use crate::Result;
-
-/// Enters a `DeviceSpan` on `$device`. The span has the given name and
+/// Enters an INFO `DeviceSpan` on `$device`. The span has the given name and
 /// fields, plus the field `gpu_delta_bytes`.
 macro_rules! device_span {
-    ($device:expr, $sync:expr, $name:literal $(, $($fields:tt)*)?) => {
+    (@level $level:expr, $device:expr, $sync:expr, $name:literal $(, $($fields:tt)*)?) => {
         $crate::trace::DeviceSpan::enter(
-            tracing::info_span!(
+            tracing::span!(
+                $level,
                 $name,
                 gpu_delta_bytes = tracing::field::Empty
                 $(, $($fields)*)?
@@ -24,12 +23,25 @@ macro_rules! device_span {
             $sync,
         )
     };
+    ($device:expr, $sync:expr, $name:literal $(, $($fields:tt)*)?) => {
+        $crate::trace::device_span!(@level tracing::Level::INFO, $device, $sync, $name $(, $($fields)*)?)
+    };
 }
 pub(crate) use device_span;
 
+/// Enters a DEBUG `DeviceSpan`. Use it for spans inside the model, which run
+/// many times for each token. The default trace filter turns them off.
+macro_rules! device_debug_span {
+    ($($args:tt)*) => {
+        $crate::trace::device_span!(@level tracing::Level::DEBUG, $($args)*)
+    };
+}
+pub(crate) use device_debug_span;
+
 /// An entered span that, when `sync` is true, waits for the device on entry
 /// and on drop. On drop it records the change in GPU allocated bytes in the
-/// field `gpu_delta_bytes`.
+/// field `gpu_delta_bytes`. A span that the filter turns off does nothing:
+/// it does not wait and does not read the GPU memory.
 pub(crate) struct DeviceSpan {
     span: EnteredSpan,
     device: Device,
@@ -39,12 +51,18 @@ pub(crate) struct DeviceSpan {
 
 impl DeviceSpan {
     pub(crate) fn enter(span: tracing::Span, device: &Device, sync: bool) -> Result<DeviceSpan> {
+        let enabled = !span.is_disabled();
+        let sync = sync && enabled;
         // Wait before the span starts, so earlier GPU work is not counted here.
         if sync {
             device.synchronize()?;
         }
         Ok(DeviceSpan {
-            gpu_start: gpu_allocated_bytes(device),
+            gpu_start: if enabled {
+                gpu_allocated_bytes(device)
+            } else {
+                0
+            },
             span: span.entered(),
             device: device.clone(),
             sync,
@@ -59,6 +77,9 @@ impl Drop for DeviceSpan {
         // this one measurement wrong, so we ignore it.
         if self.sync {
             let _ = self.device.synchronize();
+        }
+        if self.span.is_disabled() {
+            return;
         }
         let delta = gpu_allocated_bytes(&self.device) as i64 - self.gpu_start as i64;
         self.span.record("gpu_delta_bytes", delta);

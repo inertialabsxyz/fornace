@@ -3,8 +3,11 @@
 //! This file is a copy of `src/models/qwen2.rs` from candle-transformers
 //! 0.11.0 (https://github.com/huggingface/candle), licensed MIT OR
 //! Apache-2.0. Fornace changes the model here. To see the changes, compare
-//! this file with the original. The only changes in the first copy are this
-//! header and the import paths.
+//! this file with the original. Changes so far:
+//!
+//! - this header and the import paths;
+//! - DEBUG trace spans in the forward pass, and a `sync_spans` argument to
+//!   `ModelForCausalLM::new` and the constructors below it.
 //!
 //! The original documentation follows.
 //!
@@ -28,6 +31,8 @@ use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
 use candle_nn::{Activation, VarBuilder};
 use candle_transformers::models::with_tracing::{Linear, RmsNorm, linear, linear_no_bias};
 use std::sync::Arc;
+
+use crate::trace::device_debug_span;
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Config {
@@ -134,10 +139,16 @@ struct Attention {
     hidden_size: usize,
     rotary_emb: Arc<RotaryEmbedding>,
     kv_cache: Option<(Tensor, Tensor)>,
+    sync_spans: bool,
 }
 
 impl Attention {
-    fn new(rotary_emb: Arc<RotaryEmbedding>, cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        rotary_emb: Arc<RotaryEmbedding>,
+        cfg: &Config,
+        vb: VarBuilder,
+        sync_spans: bool,
+    ) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads;
@@ -159,6 +170,7 @@ impl Attention {
             hidden_size: hidden_sz,
             rotary_emb,
             kv_cache: None,
+            sync_spans,
         })
     }
 
@@ -169,41 +181,58 @@ impl Attention {
         seqlen_offset: usize,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
+        let (device, sync) = (xs.device(), self.sync_spans);
 
-        let query_states = self.q_proj.forward(xs)?;
-        let key_states = self.k_proj.forward(xs)?;
-        let value_states = self.v_proj.forward(xs)?;
+        let (query_states, key_states, value_states) = {
+            let _span = device_debug_span!(device, sync, "attn.qkv")?;
+            let query_states = self.q_proj.forward(xs)?;
+            let key_states = self.k_proj.forward(xs)?;
+            let value_states = self.v_proj.forward(xs)?;
 
-        let query_states = query_states
-            .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let key_states = key_states
-            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let value_states = value_states
-            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-
-        let (query_states, key_states) =
-            self.rotary_emb
-                .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
-
-        let (key_states, value_states) = match &self.kv_cache {
-            None => (key_states, value_states),
-            Some((prev_k, prev_v)) => {
-                let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
-                let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
-                (key_states, value_states)
-            }
+            let query_states = query_states
+                .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let key_states = key_states
+                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let value_states = value_states
+                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (query_states, key_states, value_states)
         };
-        self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
-        let key_states =
-            candle_transformers::utils::repeat_kv(key_states, self.num_kv_groups)?.contiguous()?;
-        let value_states = candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?
-            .contiguous()?;
+        let (query_states, key_states) = {
+            let _span = device_debug_span!(device, sync, "attn.rope")?;
+            self.rotary_emb
+                .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?
+        };
+
+        let (key_states, value_states) = {
+            let _span = device_debug_span!(device, sync, "attn.kv_append")?;
+            let (key_states, value_states) = match &self.kv_cache {
+                None => (key_states, value_states),
+                Some((prev_k, prev_v)) => {
+                    let key_states = Tensor::cat(&[prev_k, &key_states], 2)?;
+                    let value_states = Tensor::cat(&[prev_v, &value_states], 2)?;
+                    (key_states, value_states)
+                }
+            };
+            self.kv_cache = Some((key_states.clone(), value_states.clone()));
+            (key_states, value_states)
+        };
+
+        let (key_states, value_states) = {
+            let _span = device_debug_span!(device, sync, "attn.repeat_kv")?;
+            let key_states = candle_transformers::utils::repeat_kv(key_states, self.num_kv_groups)?
+                .contiguous()?;
+            let value_states =
+                candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?
+                    .contiguous()?;
+            (key_states, value_states)
+        };
 
         let attn_output = {
+            let _span = device_debug_span!(device, sync, "attn.sdpa")?;
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
             let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
 
@@ -214,6 +243,7 @@ impl Attention {
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
             attn_weights.matmul(&value_states)?
         };
+        let _span = device_debug_span!(device, sync, "attn.o_proj")?;
         attn_output
             .transpose(1, 2)?
             .reshape((b_sz, q_len, self.hidden_size))?
@@ -231,11 +261,17 @@ struct DecoderLayer {
     mlp: MLP,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
+    sync_spans: bool,
 }
 
 impl DecoderLayer {
-    fn new(rotary_emb: Arc<RotaryEmbedding>, cfg: &Config, vb: VarBuilder) -> Result<Self> {
-        let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
+    fn new(
+        rotary_emb: Arc<RotaryEmbedding>,
+        cfg: &Config,
+        vb: VarBuilder,
+        sync_spans: bool,
+    ) -> Result<Self> {
+        let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"), sync_spans)?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
         let input_layernorm =
             RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
@@ -249,6 +285,7 @@ impl DecoderLayer {
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            sync_spans,
         })
     }
 
@@ -258,10 +295,15 @@ impl DecoderLayer {
         attention_mask: Option<&Tensor>,
         seqlen_offset: usize,
     ) -> Result<Tensor> {
-        let residual = xs;
-        let xs = self.input_layernorm.forward(xs)?;
-        let xs = self.self_attn.forward(&xs, attention_mask, seqlen_offset)?;
-        let xs = (xs + residual)?;
+        let (device, sync) = (xs.device(), self.sync_spans);
+        let xs = {
+            let _span = device_debug_span!(device, sync, "attn")?;
+            let residual = xs;
+            let xs = self.input_layernorm.forward(xs)?;
+            let xs = self.self_attn.forward(&xs, attention_mask, seqlen_offset)?;
+            (xs + residual)?
+        };
+        let _span = device_debug_span!(device, sync, "mlp")?;
         let residual = &xs;
         let xs = xs.apply(&self.post_attention_layernorm)?.apply(&self.mlp)?;
         residual + xs
@@ -280,10 +322,11 @@ pub struct Model {
     sliding_window: usize,
     device: Device,
     dtype: DType,
+    sync_spans: bool,
 }
 
 impl Model {
-    pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &Config, vb: VarBuilder, sync_spans: bool) -> Result<Self> {
         let vb_m = vb.pp("model");
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
@@ -291,7 +334,7 @@ impl Model {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_l = vb_m.pp("layers");
         for layer_idx in 0..cfg.num_hidden_layers {
-            let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?;
+            let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx), sync_spans)?;
             layers.push(layer)
         }
         let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
@@ -302,6 +345,7 @@ impl Model {
             sliding_window: cfg.sliding_window,
             device: vb.device().clone(),
             dtype: vb.dtype(),
+            sync_spans,
         })
     }
 
@@ -355,20 +399,29 @@ impl Model {
         attn_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (b_size, seq_len) = input_ids.dims2()?;
-        let attention_mask: Option<Tensor> = match attn_mask {
-            Some(mask) => Some(self.prepare_attention_mask(mask)?),
-            None => {
-                if seq_len <= 1 {
-                    None
-                } else {
-                    Some(self.prepare_causal_attention_mask(b_size, seq_len, seqlen_offset)?)
+        let (device, sync) = (&self.device, self.sync_spans);
+        let attention_mask: Option<Tensor> = {
+            let _span = device_debug_span!(device, sync, "mask")?;
+            match attn_mask {
+                Some(mask) => Some(self.prepare_attention_mask(mask)?),
+                None => {
+                    if seq_len <= 1 {
+                        None
+                    } else {
+                        Some(self.prepare_causal_attention_mask(b_size, seq_len, seqlen_offset)?)
+                    }
                 }
             }
         };
-        let mut xs = self.embed_tokens.forward(input_ids)?;
-        for layer in self.layers.iter_mut() {
+        let mut xs = {
+            let _span = device_debug_span!(device, sync, "embed")?;
+            self.embed_tokens.forward(input_ids)?
+        };
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let _span = device_debug_span!(device, sync, "layer", i)?;
             xs = layer.forward(&xs, attention_mask.as_ref(), seqlen_offset)?
         }
+        let _span = device_debug_span!(device, sync, "norm")?;
         xs.apply(&self.norm)
     }
 
@@ -386,8 +439,11 @@ pub struct ModelForCausalLM {
 }
 
 impl ModelForCausalLM {
-    pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
-        let base_model = Model::new(cfg, vb.clone())?;
+    /// Builds the model. When `sync_spans` is true, each trace span inside
+    /// the model waits for the device when it starts and ends. See
+    /// `LoadConfig::sync_spans`.
+    pub fn new(cfg: &Config, vb: VarBuilder, sync_spans: bool) -> Result<Self> {
+        let base_model = Model::new(cfg, vb.clone(), sync_spans)?;
         let lm_head = if vb.contains_tensor("lm_head.weight") {
             linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?
         } else {
@@ -401,10 +457,16 @@ impl ModelForCausalLM {
 
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
         let (_b_size, seq_len) = input_ids.dims2()?;
-        self.base_model
+        let xs = self
+            .base_model
             .forward(input_ids, seqlen_offset, None)?
-            .narrow(1, seq_len - 1, 1)?
-            .apply(&self.lm_head)
+            .narrow(1, seq_len - 1, 1)?;
+        let _span = device_debug_span!(
+            &self.base_model.device,
+            self.base_model.sync_spans,
+            "lm_head"
+        )?;
+        xs.apply(&self.lm_head)
     }
 
     pub fn clear_kv_cache(&mut self) {

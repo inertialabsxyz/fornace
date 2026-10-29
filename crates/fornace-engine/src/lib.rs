@@ -201,7 +201,7 @@ impl Engine {
         // output head from those tensors. You write none of the layers here.
         let model = {
             let _span = device_span!(&device, sync, "load.model")?;
-            ModelForCausalLM::new(&config, vb)?
+            ModelForCausalLM::new(&config, vb, sync)?
         };
 
         Ok(Engine {

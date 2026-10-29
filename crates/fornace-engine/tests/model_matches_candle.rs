@@ -81,7 +81,7 @@ fn fornace_qwen2_matches_candle_qwen2() {
     let (candle_prefill, candle_tokens) = run(|x, pos| candle.forward(x, pos), &prompt, &device);
 
     let config: fornace_qwen2::Config = serde_json::from_slice(&config_json).unwrap();
-    let mut fornace = fornace_qwen2::ModelForCausalLM::new(&config, vb).unwrap();
+    let mut fornace = fornace_qwen2::ModelForCausalLM::new(&config, vb, false).unwrap();
     let (fornace_prefill, fornace_tokens) = run(|x, pos| fornace.forward(x, pos), &prompt, &device);
 
     assert!(
