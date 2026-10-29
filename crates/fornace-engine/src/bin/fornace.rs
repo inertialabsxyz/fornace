@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use fornace_engine::{Config, DeviceKind, Dtype, Engine};
+use fornace_engine::{DeviceKind, Dtype, Engine, LoadConfig};
 
 #[cfg(target_os = "macos")]
 const DEFAULT_DEVICE: &str = "metal";
@@ -38,7 +38,7 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let config = Config {
+    let config = LoadConfig {
         model_dir: args.model,
         dtype: args.dtype,
         device: args.device,

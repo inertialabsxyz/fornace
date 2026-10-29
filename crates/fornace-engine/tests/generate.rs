@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use fornace_engine::{Config, DeviceKind, Dtype, Engine};
+use fornace_engine::{DeviceKind, Dtype, Engine, LoadConfig};
 
 /// Greedy decoding of a known prompt gives the known answer.
 ///
@@ -12,7 +12,7 @@ fn greedy_decode_names_the_capital_of_spain() {
         eprintln!("skipped: FORNACE_MODEL_DIR is not set");
         return;
     };
-    let config = Config {
+    let config = LoadConfig {
         model_dir: PathBuf::from(model_dir),
         dtype: Dtype::F16,
         device: DeviceKind::Cpu,
