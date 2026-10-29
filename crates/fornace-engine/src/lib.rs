@@ -9,6 +9,7 @@ mod model;
 mod sampler;
 
 use std::fmt;
+use std::panic::Location;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -17,12 +18,24 @@ use serde::{Deserialize, Serialize};
 /// The errors that the engine can return.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("not implemented")]
-    NotImplemented,
+    #[error("not implemented at {location}")]
+    NotImplemented {
+        location: &'static Location<'static>,
+    },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("model error: {0}")]
     Model(String),
+}
+
+impl Error {
+    /// Returns `NotImplemented` with the source location of the caller.
+    #[track_caller]
+    pub fn not_implemented() -> Error {
+        Error::NotImplemented {
+            location: Location::caller(),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -117,12 +130,12 @@ pub struct Engine {
 impl Engine {
     /// Loads the model from `config.model_dir`.
     pub fn load(_config: &Config) -> Result<Engine> {
-        Err(Error::NotImplemented)
+        Err(Error::not_implemented())
     }
 
     /// Generates text that continues `prompt`.
     pub fn generate(&mut self, _prompt: &str) -> Result<GenerationReport> {
-        Err(Error::NotImplemented)
+        Err(Error::not_implemented())
     }
 }
 
