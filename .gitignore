@@ -3,3 +3,4 @@ models/
 *.safetensors
 *.gguf
 .DS_Store
+trace.json
