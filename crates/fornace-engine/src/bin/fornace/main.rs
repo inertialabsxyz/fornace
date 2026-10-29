@@ -114,7 +114,10 @@ fn main() -> anyhow::Result<()> {
             "time to first token:  {:.1} ms",
             report.time_to_first_token_ms
         );
-        println!("peak RSS:             {} bytes", report.peak_rss_bytes);
+        println!(
+            "peak memory:          {:.1} MB",
+            report.peak_memory_bytes as f64 / 1e6
+        );
         if args.plot {
             println!();
             plot::decode_times(&report);

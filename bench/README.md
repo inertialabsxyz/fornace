@@ -40,5 +40,7 @@ name of its CSV file and the commit.
 - `prefill_tokens_per_s`: the prompt tokens processed each second.
 - `decode_tokens_per_s`: the generated tokens each second.
 - `time_to_first_token_ms`: the time from the start to the first generated token, in milliseconds.
-- `peak_rss_mb`: the peak resident memory of the process, in megabytes.
+- `peak_memory_mb`: the peak memory of the process, in megabytes. On macOS
+  this is the physical footprint, which includes Metal buffers. On Linux it
+  is the peak RSS.
 - `quality`: a quality score. This column is empty until quantization is added.

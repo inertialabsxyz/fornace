@@ -4,7 +4,7 @@
 //! benchmark table. At this commit, the public API is stubs only.
 
 mod cache;
-mod metrics;
+pub mod metrics;
 pub mod model;
 mod sampler;
 mod trace;
@@ -22,7 +22,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
 
-use crate::metrics::peak_rss_bytes;
+use crate::metrics::peak_memory_bytes;
 use crate::model::{Config, ModelForCausalLM};
 use crate::trace::device_span;
 
@@ -142,7 +142,8 @@ pub struct GenerationReport {
     pub prefill_tokens_per_s: f64,
     pub decode_tokens_per_s: f64,
     pub time_to_first_token_ms: f64,
-    pub peak_rss_bytes: u64,
+    /// The peak memory of the process, as defined in [`metrics`].
+    pub peak_memory_bytes: u64,
     pub text: String,
     pub decode_token_ms: Vec<f64>,
 }
@@ -306,7 +307,7 @@ impl Engine {
             prefill_tokens_per_s: ids.len() as f64 / secs(first_token),
             decode_tokens_per_s: (generated.len() - 1) as f64 / secs(decode),
             time_to_first_token_ms: first_token.as_secs_f64() * 1e3,
-            peak_rss_bytes: peak_rss_bytes(),
+            peak_memory_bytes: peak_memory_bytes(),
             text,
             decode_token_ms,
         })

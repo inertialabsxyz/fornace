@@ -15,8 +15,12 @@ use tracing_subscriber::registry::LookupSpan;
 /// The span names from the root span down to this span.
 type Path = Vec<&'static str>;
 
-/// A `tracing` layer that collects the time, GPU memory, and RSS of each
+/// A `tracing` layer that collects the time and the memory change of each
 /// span, grouped by span path.
+///
+/// "Δmem" is the process memory from `fornace_engine::metrics`. On Apple
+/// silicon it includes Metal buffers, so "of which metal" is a part of
+/// "Δmem", not an addition to it.
 #[derive(Clone, Default)]
 pub struct Summary {
     rows: Arc<Mutex<HashMap<Path, Row>>>,
@@ -28,7 +32,7 @@ struct Row {
     order: usize,
     busy_ms: Vec<f64>,
     gpu_delta_bytes: Option<i64>,
-    rss_delta_bytes: i64,
+    memory_delta_bytes: i64,
 }
 
 /// The state of one span between its creation and its close.
@@ -41,7 +45,7 @@ struct Open {
 struct Entered {
     path: Path,
     at: Instant,
-    rss_bytes: i64,
+    memory_bytes: i64,
 }
 
 thread_local! {
@@ -64,8 +68,8 @@ impl Visit for GpuDelta<'_> {
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
 }
 
-fn rss_bytes() -> i64 {
-    memory_stats::memory_stats().map_or(0, |m| m.physical_mem as i64)
+fn memory_bytes() -> i64 {
+    fornace_engine::metrics::memory_bytes() as i64
 }
 
 impl<S> Layer<S> for Summary
@@ -100,7 +104,7 @@ where
             stack.push(Entered {
                 path,
                 at: Instant::now(),
-                rss_bytes: rss_bytes(),
+                memory_bytes: memory_bytes(),
             });
         });
     }
@@ -111,7 +115,7 @@ where
             return;
         };
         let busy_ms = entered.at.elapsed().as_secs_f64() * 1e3;
-        let rss_delta = rss_bytes() - entered.rss_bytes;
+        let memory_delta = memory_bytes() - entered.memory_bytes;
         // DeviceSpan records the GPU change just before it exits.
         let gpu_delta = span
             .extensions_mut()
@@ -120,7 +124,7 @@ where
         let mut rows = self.rows.lock().unwrap();
         if let Some(row) = rows.get_mut(&entered.path) {
             row.busy_ms.push(busy_ms);
-            row.rss_delta_bytes += rss_delta;
+            row.memory_delta_bytes += memory_delta;
             if let Some(delta) = gpu_delta {
                 *row.gpu_delta_bytes.get_or_insert(0) += delta;
             }
@@ -139,7 +143,7 @@ impl Summary {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "{:<28} {:>7} {:>10} {:>9} {:>8} {:>8} {:>9} {:>8} {:>8}",
+            "{:<28} {:>7} {:>10} {:>9} {:>8} {:>8} {:>9} {:>8} {:>9}",
             "span",
             "count",
             "total ms",
@@ -147,8 +151,8 @@ impl Summary {
             "p50 ms",
             "p95 ms",
             "% parent",
-            "Δgpu MB",
-            "Δrss MB"
+            "Δmem MB",
+            "metal MB"
         );
         for path in paths {
             let row = &rows[path];
@@ -168,12 +172,12 @@ impl Summary {
             let name = format!("{}{}", "  ".repeat(path.len() - 1), path[path.len() - 1]);
             let _ = writeln!(
                 out,
-                "{name:<28} {:>7} {sum:>10.1} {:>9.2} {:>8.2} {:>8.2} {parent:>9} {gpu:>8} {:>8.1}",
+                "{name:<28} {:>7} {sum:>10.1} {:>9.2} {:>8.2} {:>8.2} {parent:>9} {:>8.1} {gpu:>9}",
                 ms.len(),
                 sum / ms.len() as f64,
                 percentile(&ms, 0.50),
                 percentile(&ms, 0.95),
-                row.rss_delta_bytes as f64 / 1e6,
+                row.memory_delta_bytes as f64 / 1e6,
             );
         }
         out
@@ -245,7 +249,7 @@ mod tests {
         assert!(lines[2].starts_with("  inner"), "{table}");
         assert_eq!(cells(lines[2])[1], "3");
         assert!(lines[3].starts_with("  gpu"), "{table}");
-        assert_eq!(cells(lines[3])[7], "2.0");
-        assert_eq!(cells(lines[1])[7], "-");
+        assert_eq!(cells(lines[3])[8], "2.0");
+        assert_eq!(cells(lines[1])[8], "-");
     }
 }
