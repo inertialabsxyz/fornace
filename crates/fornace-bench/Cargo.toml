@@ -1,0 +1,16 @@
+[package]
+name = "fornace-bench"
+description = "The benchmark harness for the Fornace engines."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+metal = ["fornace-engine/metal"]
+
+[dependencies]
+fornace-engine.workspace = true
+clap.workspace = true
+serde.workspace = true
+csv.workspace = true

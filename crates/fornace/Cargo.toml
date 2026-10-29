@@ -1,0 +1,13 @@
+[package]
+name = "fornace"
+description = "Fornace: small models that run where your data lives."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+metal = ["fornace-engine/metal"]
+
+[dependencies]
+fornace-engine.workspace = true
