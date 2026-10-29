@@ -13,7 +13,12 @@ use std::panic::Location;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use candle_transformers::models::qwen2::{Config, ModelForCausalLM};
 use serde::{Deserialize, Serialize};
+
+use candle_core::{DType, Device};
+use candle_nn::VarBuilder;
+use tokenizers::Tokenizer;
 
 /// The errors that the engine can return.
 #[derive(Debug, thiserror::Error)]
@@ -22,10 +27,17 @@ pub enum Error {
     NotImplemented {
         location: &'static Location<'static>,
     },
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("model error: {0}")]
-    Model(String),
+    #[error("cannot read {path}")]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("invalid config.json")]
+    Config(#[from] serde_json::Error),
+    #[error("cannot load the tokenizer")]
+    Tokenizer(#[source] tokenizers::Error),
+    #[error("candle")]
+    Candle(#[from] candle_core::Error),
 }
 
 impl Error {
@@ -132,13 +144,42 @@ fn gpu_mb(dev: &Device) -> f64 {
 /// A loaded model that generates text.
 #[derive(Debug)]
 pub struct Engine {
-    _private: (),
+    model: ModelForCausalLM,
+    tokenizer: Tokenizer,
+    device: Device,
 }
 
 impl Engine {
     /// Loads the model from `config.model_dir`.
-    pub fn load(_config: &Config) -> Result<Engine> {
-        Err(Error::not_implemented())
+    pub fn load(load_config: &LoadConfig) -> Result<Engine> {
+        // The GPU, through Metal. Device::Cpu also works, only slower.
+        let device = Device::new_metal(0)?;
+        let path = load_config.model_dir.join("config.json");
+        // config.json gives the shape of the model: 24 layers, hidden 896,
+        // attention heads, vocab size. This line also needs the serde_json crate.
+        let bytes = std::fs::read(&path).map_err(|source| Error::Read { path, source })?;
+        let config: Config = serde_json::from_slice(&bytes)?;
+        // One ~1 GB safetensors file that holds every weight tensor, by name.
+        let weights = load_config.model_dir.join("model.safetensors");
+        // The tokenizer turns text into token ids, and ids back into text.
+        let tokenizer = Tokenizer::from_file(load_config.model_dir.join("tokenizer.json"))
+            .map_err(Error::Tokenizer)?;
+        // VarBuilder maps the file into memory (mmap) and gives each layer its
+        // tensors by name, as BF16 on the device. No full read happens here,
+        // so the load takes milliseconds. It is unsafe because mmap trusts
+        // that the file does not change while it is mapped.
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights], DType::BF16, &device)? };
+        // Candle's Qwen2 code builds the embedding, the 24 layers and the
+        // output head from those tensors. You write none of the layers here.
+        let model = ModelForCausalLM::new(&config, vb)?;
+
+        println!("Loaded model, memory: {} MB", gpu_mb(&device));
+
+        Ok(Engine {
+            model,
+            tokenizer,
+            device,
+        })
     }
 
     /// Generates text that continues `prompt`.
