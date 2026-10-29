@@ -12,6 +12,9 @@ use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+#[cfg(target_os = "macos")]
+const DEFAULT_DEVICE: &str = "metal";
+#[cfg(not(target_os = "macos"))]
 const DEFAULT_DEVICE: &str = "cpu";
 
 #[derive(Clone, Copy, ValueEnum)]

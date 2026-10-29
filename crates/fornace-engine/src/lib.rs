@@ -5,7 +5,7 @@
 
 mod cache;
 mod metrics;
-mod model;
+pub mod model;
 mod sampler;
 mod trace;
 
@@ -15,10 +15,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use std::{fmt, time::Instant};
 
-use candle_transformers::{
-    generation::{LogitsProcessor, Sampling},
-    models::qwen2::{Config, ModelForCausalLM},
-};
+use candle_transformers::generation::{LogitsProcessor, Sampling};
 use serde::{Deserialize, Serialize};
 
 use candle_core::{DType, Device, Tensor};
@@ -26,6 +23,7 @@ use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
 
 use crate::metrics::peak_rss_bytes;
+use crate::model::{Config, ModelForCausalLM};
 use crate::trace::device_span;
 
 /// The errors that the engine can return.
