@@ -101,7 +101,7 @@ impl fmt::Display for DeviceKind {
 
 /// The settings for one engine.
 #[derive(Debug, Clone)]
-pub struct Config {
+pub struct LoadConfig {
     pub model_dir: PathBuf,
     pub dtype: Dtype,
     pub device: DeviceKind,
