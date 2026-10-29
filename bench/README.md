@@ -9,7 +9,7 @@ Download the model first with `scripts/get-model.sh`. Then run:
 
 ```sh
 cargo run --release -p fornace-bench -- \
-    --model ./models/qwen2.5-0.5b \
+    --model ./models/qwen2.5-0.5b-instruct \
     --engines fornace,mistralrs,llamacpp \
     --out bench/runs/latest.csv
 ```

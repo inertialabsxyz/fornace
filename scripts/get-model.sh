@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download Qwen/Qwen2.5-0.5B (safetensors) into ./models/qwen2.5-0.5b.
+# Download Qwen/Qwen2.5-0.5B-Instruct (safetensors) into ./models/qwen2.5-0.5b-instruct.
 # You must install the hf CLI first: pip install -U huggingface_hub
 set -euo pipefail
 

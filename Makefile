@@ -36,5 +36,5 @@ run: ## Generate text from PROMPT with the model in MODEL
 bench: ## Run the benchmark harness on the model in MODEL
 	cargo run --release $(FEATURES) -p fornace-bench -- --model $(MODEL)
 
-model: ## Download Qwen2.5-0.5B to ./models/qwen2.5-0.5b
+model: ## Download Qwen2.5-0.5B-Instruct to ./models/qwen2.5-0.5b-instruct
 	scripts/get-model.sh
