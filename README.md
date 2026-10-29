@@ -45,7 +45,7 @@ make check
 The model test runs only when `FORNACE_MODEL_DIR` is set:
 
 ```sh
-FORNACE_MODEL_DIR=./models/qwen2.5-0.5b make test
+FORNACE_MODEL_DIR=$PWD/models/qwen2.5-0.5b make test
 ```
 
 Run the benchmark:
