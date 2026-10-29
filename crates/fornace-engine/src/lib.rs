@@ -163,8 +163,17 @@ impl Engine {
     pub fn load(load_config: &LoadConfig) -> Result<Engine> {
         let _load = tracing::info_span!("load").entered();
         let sync = load_config.sync_spans;
-        // The GPU, through Metal. Device::Cpu also works, only slower.
-        let device = Device::new_metal(0)?;
+        // Without the `metal` feature, new_metal returns an error.
+        let device = match load_config.device {
+            DeviceKind::Cpu => Device::Cpu,
+            DeviceKind::Metal => Device::new_metal(0)?,
+        };
+        // Candle's CPU backend has no BF16 matmul, so the CPU computes in F32.
+        let dtype = if device.is_cpu() {
+            DType::F32
+        } else {
+            DType::BF16
+        };
         let path = load_config.model_dir.join("config.json");
         // config.json gives the shape of the model: 24 layers, hidden 896,
         // attention heads, vocab size. This line also needs the serde_json crate.
@@ -182,12 +191,12 @@ impl Engine {
                 .map_err(Error::Tokenizer)?
         };
         // VarBuilder maps the file into memory (mmap) and gives each layer its
-        // tensors by name, as BF16 on the device. No full read happens here,
+        // tensors by name, as `dtype` on the device. No full read happens here,
         // so the load takes milliseconds. It is unsafe because mmap trusts
         // that the file does not change while it is mapped.
         let vb = {
             let _span = device_span!(&device, sync, "load.weights")?;
-            unsafe { VarBuilder::from_mmaped_safetensors(&[weights], DType::BF16, &device)? }
+            unsafe { VarBuilder::from_mmaped_safetensors(&[weights], dtype, &device)? }
         };
         // Candle's Qwen2 code builds the embedding, the 24 layers and the
         // output head from those tensors. You write none of the layers here.
