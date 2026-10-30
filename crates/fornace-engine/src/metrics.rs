@@ -57,10 +57,12 @@ mod imp {
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
         if rc != 0 {
-            return 0;
+            return memory_bytes();
         }
-        // Linux reports ru_maxrss in kilobytes.
-        usage.ru_maxrss as u64 * 1024
+        // Linux reports ru_maxrss in kilobytes. The kernel reads it from an
+        // approximate per-CPU counter, so it can lag behind the RSS that
+        // /proc reports. The peak is never less than the current value.
+        (usage.ru_maxrss as u64 * 1024).max(memory_bytes())
     }
 }
 
