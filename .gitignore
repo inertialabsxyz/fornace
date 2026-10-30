@@ -4,3 +4,5 @@ models/
 *.gguf
 .DS_Store
 trace.json
+fornace-private/
+docs/
