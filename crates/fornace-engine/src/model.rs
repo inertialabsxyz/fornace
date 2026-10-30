@@ -8,8 +8,10 @@
 //! - this header and the import paths;
 //! - DEBUG trace spans in the forward pass, and a `sync_spans` argument to
 //!   `ModelForCausalLM::new` and the constructors below it;
-//! - a choice of KV cache (`KvCacheKind`), set with `reset_kv_cache`. The
-//!   default, `Cat`, is the original code.
+//! - a choice of KV cache (`KvCacheKind`), set with `reset_kv_cache`. A new
+//!   model starts with `Cat`, which is the original code. `Engine` resets
+//!   the cache to `LoadConfig::kv_cache` (default `Prealloc`) before each
+//!   generation.
 //!
 //! The original documentation follows.
 //!

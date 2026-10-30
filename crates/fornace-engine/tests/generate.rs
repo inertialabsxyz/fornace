@@ -4,8 +4,8 @@ use fornace_engine::{DeviceKind, Dtype, Engine, LoadConfig};
 
 /// Greedy decoding of a known prompt gives the known answer.
 ///
-/// Set `FORNACE_MODEL_DIR` to a Qwen2.5-0.5B directory to run this test.
-/// While the engine is stubs, the test fails with `NotImplemented`.
+/// Set `FORNACE_MODEL_DIR` to the absolute path of a Qwen2.5-0.5B directory
+/// to run this test.
 #[test]
 fn greedy_decode_names_the_capital_of_spain() {
     let Ok(model_dir) = std::env::var("FORNACE_MODEL_DIR") else {

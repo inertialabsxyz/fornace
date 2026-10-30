@@ -1,7 +1,8 @@
 //! A small inference engine on Candle.
 //!
-//! The engine grows one idea at a time. Each commit adds one row to one
-//! benchmark table. At this commit, the public API is stubs only.
+//! The engine loads Qwen2.5 safetensors and generates text on the CPU or on
+//! Metal. Each `generate` call returns a `GenerationReport` with timings and
+//! memory. The model code is in [`model`], a copy of Candle's Qwen2.
 
 mod cache;
 pub mod metrics;
@@ -200,8 +201,8 @@ impl Engine {
             let _span = device_span!(&device, sync, "load.weights")?;
             unsafe { VarBuilder::from_mmaped_safetensors(&[weights], dtype, &device)? }
         };
-        // Candle's Qwen2 code builds the embedding, the 24 layers and the
-        // output head from those tensors. You write none of the layers here.
+        // model.rs (a copy of Candle's Qwen2) builds the embedding, the 24
+        // layers and the output head from those tensors.
         let model = {
             let _span = device_span!(&device, sync, "load.model")?;
             ModelForCausalLM::new(&config, vb, sync)?
