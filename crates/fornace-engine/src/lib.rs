@@ -70,6 +70,12 @@ pub enum Dtype {
     F16,
     Q8,
     Q4,
+    /// Unquantized weights on Metal today. Only reported, not parsed. See
+    /// [`Engine::effective_dtype`].
+    Bf16,
+    /// Unquantized weights on the CPU today. Only reported, not parsed. See
+    /// [`Engine::effective_dtype`].
+    F32,
 }
 
 impl FromStr for Dtype {
@@ -91,6 +97,8 @@ impl fmt::Display for Dtype {
             Dtype::F16 => "f16",
             Dtype::Q8 => "q8",
             Dtype::Q4 => "q4",
+            Dtype::Bf16 => "bf16",
+            Dtype::F32 => "f32",
         })
     }
 }
@@ -161,12 +169,16 @@ pub struct Engine {
     model: ModelForCausalLM,
     tokenizer: Tokenizer,
     device: Device,
+    dtype: DType,
     load_config: LoadConfig,
+    /// The wall time of [`Engine::load`], in milliseconds.
+    pub load_ms: f64,
 }
 
 impl Engine {
     /// Loads the model from `config.model_dir`.
     pub fn load(load_config: &LoadConfig) -> Result<Engine> {
+        let start = Instant::now();
         let _load = tracing::info_span!("load").entered();
         let sync = load_config.sync_spans;
         // Without the `metal` feature, new_metal returns an error.
@@ -215,8 +227,21 @@ impl Engine {
             model,
             tokenizer,
             device,
+            dtype,
             load_config: load_config.clone(),
+            load_ms: start.elapsed().as_secs_f64() * 1e3,
         })
+    }
+
+    /// The format of the loaded weights. This can differ from
+    /// `LoadConfig::dtype`. Nothing is quantized today, so the weights use
+    /// the compute dtype of the device: BF16 on Metal and F32 on the CPU.
+    pub fn effective_dtype(&self) -> Dtype {
+        match self.dtype {
+            DType::BF16 => Dtype::Bf16,
+            DType::F16 => Dtype::F16,
+            _ => Dtype::F32,
+        }
     }
 
     /// Generates text that continues `prompt`.
@@ -334,6 +359,13 @@ mod tests {
             assert_eq!(d.to_string().parse::<Dtype>(), Ok(d));
         }
         assert!("f32".parse::<Dtype>().is_err());
+    }
+
+    #[test]
+    fn reported_dtypes_display_but_do_not_parse() {
+        for d in [Dtype::Bf16, Dtype::F32] {
+            assert!(d.to_string().parse::<Dtype>().is_err());
+        }
     }
 
     #[test]
