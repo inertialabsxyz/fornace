@@ -20,6 +20,7 @@ fn greedy_decode_names_the_capital_of_spain() {
         batch: 1,
         kv_cache: Default::default(),
         sync_spans: false,
+        ignore_eos: false,
     };
     let mut engine = Engine::load(&config).expect("load the engine");
     let report = engine

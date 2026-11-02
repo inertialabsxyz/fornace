@@ -136,6 +136,9 @@ pub struct LoadConfig {
     /// Wait for the device at the start and end of each span, so that spans
     /// measure GPU time. This makes generation slower. Use it only to trace.
     pub sync_spans: bool,
+    /// Do not stop at the end-of-sequence token. Each generation then
+    /// decodes exactly `max_new_tokens` tokens, so runs are comparable.
+    pub ignore_eos: bool,
 }
 
 /// The result of one generation, with its measurements.
@@ -290,7 +293,7 @@ impl Engine {
             };
             decode_token_ms.push(step.elapsed().as_secs_f64() * 1e3);
             // #6 Next token is eos, stop
-            if eos.contains(&Some(next)) {
+            if !self.load_config.ignore_eos && eos.contains(&Some(next)) {
                 break;
             }
             generated.push(next);

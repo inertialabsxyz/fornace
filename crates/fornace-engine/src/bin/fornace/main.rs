@@ -49,6 +49,10 @@ struct Args {
     /// The KV cache: cat (Candle's original), cat-contiguous, or prealloc.
     #[arg(long, default_value = "prealloc")]
     kv_cache: KvCacheKind,
+    /// Do not stop at the end-of-sequence token. Generate exactly
+    /// --max-new-tokens tokens.
+    #[arg(long)]
+    ignore_eos: bool,
     /// Print the report as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -98,6 +102,7 @@ fn main() -> anyhow::Result<()> {
         batch: args.batch,
         kv_cache: args.kv_cache,
         sync_spans: args.trace.is_some(),
+        ignore_eos: args.ignore_eos,
     };
     let mut engine = Engine::load(&config)?;
     let report = engine.generate(&args.prompt)?;
