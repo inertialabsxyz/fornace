@@ -1,0 +1,11 @@
+# commit 54aabe8 plus the uncommitted --trace-sync change, 2026-11-02: cargo run --release -p fornace-engine --features metal --bin fornace -- --model ./models/qwen2.5-0.5b-instruct --prompt "$(cat bench/prompts/alice-2048.txt)" --max-new-tokens 1 --kv-cache prealloc --trace chrome --trace-filter fornace_engine=debug --trace-sync false --trace-out bench/runs/2026-11-02-54aabe8-trace-nosync-prealloc-debug-2048.json
+warning: --trace-sync false. Span times do not include GPU time.
+ water
+
+prompt tokens:        2048
+generated tokens:     1
+prefill tokens/s:     2157.1
+decode tokens/s:      0.0
+time to first token:  949.4 ms
+peak memory:          1694.1 MB
+Wrote the trace timeline to bench/runs/2026-11-02-54aabe8-trace-nosync-prealloc-debug-2048.json
