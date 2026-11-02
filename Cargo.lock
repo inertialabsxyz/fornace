@@ -176,8 +176,7 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ecb245093b0f791b89d3420c3df9c6d49c60ab63ba54db896bf8a3baf486706"
+source = "git+https://github.com/inertialabsxyz/candle?rev=fd66fe88df2220f8f9a78b20921237009e2a4c54#fd66fe88df2220f8f9a78b20921237009e2a4c54"
 dependencies = [
  "byteorder",
  "candle-metal-kernels",
@@ -206,8 +205,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "242e83c6acf639bb273c929d73c67a882bb4dd08a140f121096e19ba2f213d3e"
+source = "git+https://github.com/inertialabsxyz/candle?rev=fd66fe88df2220f8f9a78b20921237009e2a4c54#fd66fe88df2220f8f9a78b20921237009e2a4c54"
 dependencies = [
  "block2",
  "half",
@@ -222,8 +220,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaa10b6ccc365b33210ce404fbf45e60d3e0bdac1004463cf1052e6ee1c1739a"
+source = "git+https://github.com/inertialabsxyz/candle?rev=fd66fe88df2220f8f9a78b20921237009e2a4c54#fd66fe88df2220f8f9a78b20921237009e2a4c54"
 dependencies = [
  "candle-core",
  "candle-metal-kernels",
@@ -259,8 +256,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "257411c33abf7d898a31ac20d80813dfe96ff09e23a73039e22ab293aea9b871"
+source = "git+https://github.com/inertialabsxyz/candle?rev=fd66fe88df2220f8f9a78b20921237009e2a4c54#fd66fe88df2220f8f9a78b20921237009e2a4c54"
 dependencies = [
  "ug",
  "ug-metal",

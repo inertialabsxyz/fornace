@@ -26,3 +26,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
 tracing-chrome = "0.7.2"
 memory-stats = "1.2.0"
+
+# Candle 0.11.0 with one change: the Metal buffer pool does not reuse a
+# buffer larger than 2 × the rounded request. Without it, a long prefill with
+# the cat-contiguous KV cache holds one score buffer for each layer.
+# Remove this patch when upstream Candle has the fix.
+[patch.crates-io]
+candle-core = { git = "https://github.com/inertialabsxyz/candle", rev = "fd66fe88df2220f8f9a78b20921237009e2a4c54" }
+candle-nn = { git = "https://github.com/inertialabsxyz/candle", rev = "fd66fe88df2220f8f9a78b20921237009e2a4c54" }
+candle-metal-kernels = { git = "https://github.com/inertialabsxyz/candle", rev = "fd66fe88df2220f8f9a78b20921237009e2a4c54" }
