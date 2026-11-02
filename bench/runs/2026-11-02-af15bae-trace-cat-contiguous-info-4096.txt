@@ -1,0 +1,35 @@
+# commit af15bae, 2026-11-02: cargo run --release -p fornace-engine --features metal --bin fornace -- --model ./models/qwen2.5-0.5b-instruct --prompt "$(cat bench/prompts/alice-4096.txt)" --max-new-tokens 128 --kv-cache cat-contiguous --trace summary
+
+I’ve been to play with the little, and I have a little, and I’m not know how to do that the
+to make them to be able to play, but I can’t
+to play with the
+the toys, and I’ve had to play with the little
+and
+to play, and I’ve got to learn to
+I’ve been to play, have a few of the
+little ones, and I’ve not know how to do to play with them to make the to play, but I’ve had to be able to play with toys, and to play, and to
+and I’ve had
+
+prompt tokens:        4096
+generated tokens:     128
+prefill tokens/s:     1191.1
+decode tokens/s:      72.4
+time to first token:  3438.8 ms
+peak memory:          15004.0 MB
+
+Trace summary. The report above includes the GPU waits of --trace.
+span                           count   total ms   mean ms   p50 ms   p95 ms  % parent  Δmem MB  metal MB
+load                               1      225.7    225.73   225.73   225.73         -   1135.3         -
+  load.config                      1        0.1      0.10     0.10     0.10       0.0      0.0         -
+  load.tokenizer                   1       90.1     90.14    90.14    90.14      39.9     50.5         -
+  load.weights                     1        0.3      0.28     0.28     0.28       0.1      0.2       0.0
+  load.model                       1      127.4    127.37   127.37   127.37      56.4   1082.1     992.2
+generate                           1     5192.2   5192.19  5192.19  5192.19         -    120.0     100.9
+  tokenize                         1        4.1      4.13     4.13     4.13       0.1      1.7         -
+  prefill                          1     3434.6   3434.63  3434.63  3434.63      66.1  11485.3   11487.4
+    forward                        1     3364.8   3364.76  3364.76  3364.76      98.0  13783.5   11487.4
+    sample                         1       69.8     69.82    69.82    69.82       2.0  -2298.2       0.0
+  decode.step                    127     1753.0     13.80    13.51    16.87      33.8 -11367.1  -11378.1
+    forward                      127     1657.9     13.05    12.92    13.55      94.6  -9215.0   -7559.8
+    sample                       127       93.2      0.73     0.57     2.89       5.3  -2152.2     -52.2
+  detokenize                       1        0.1      0.12     0.12     0.12       0.0      0.0         -
