@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{ArgAction, Parser, ValueEnum};
-use fornace_engine::{DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig};
+use fornace_engine::{AttentionKind, DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -49,6 +49,10 @@ struct Args {
     /// The KV cache: cat (Candle's original), cat-contiguous, or prealloc.
     #[arg(long, default_value = "prealloc")]
     kv_cache: KvCacheKind,
+    /// The attention: naive (matmul and softmax) or fused (Candle's fused
+    /// Metal kernel). Fused needs --device metal.
+    #[arg(long, default_value = "naive")]
+    attention: AttentionKind,
     /// Do not stop at the end-of-sequence token. Generate exactly
     /// --max-new-tokens tokens.
     #[arg(long)]
@@ -109,6 +113,7 @@ fn main() -> anyhow::Result<()> {
         max_new_tokens: args.max_new_tokens,
         batch: args.batch,
         kv_cache: args.kv_cache,
+        attention: args.attention,
         sync_spans: args.trace.is_some() && args.trace_sync,
         ignore_eos: args.ignore_eos,
     };
@@ -171,5 +176,13 @@ mod tests {
     fn trace_sync_false_is_parsed() {
         let args = Args::try_parse_from(BASE.iter().chain(&["--trace-sync", "false"])).unwrap();
         assert!(!args.trace_sync);
+    }
+
+    #[test]
+    fn attention_is_naive_by_default_and_parses_fused() {
+        let args = Args::try_parse_from(BASE).unwrap();
+        assert_eq!(args.attention, AttentionKind::Naive);
+        let args = Args::try_parse_from(BASE.iter().chain(&["--attention", "fused"])).unwrap();
+        assert_eq!(args.attention, AttentionKind::Fused);
     }
 }

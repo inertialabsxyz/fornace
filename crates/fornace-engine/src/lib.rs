@@ -25,6 +25,7 @@ use tokenizers::Tokenizer;
 
 pub use crate::cache::KvCacheKind;
 use crate::metrics::peak_memory_bytes;
+pub use crate::model::AttentionKind;
 use crate::model::{Config, ModelForCausalLM};
 use crate::trace::device_span;
 
@@ -48,6 +49,8 @@ pub enum Error {
     TokenEncoding(#[source] tokenizers::Error),
     #[error("cannot decode from tokens")]
     TokenDecoding(#[source] tokenizers::Error),
+    #[error("fused attention needs the metal device")]
+    FusedAttentionNeedsMetal,
     #[error("candle")]
     Candle(#[from] candle_core::Error),
 }
@@ -141,6 +144,8 @@ pub struct LoadConfig {
     pub batch: usize,
     /// How each attention layer stores earlier keys and values.
     pub kv_cache: KvCacheKind,
+    /// How each attention layer computes attention.
+    pub attention: AttentionKind,
     /// Wait for the device at the start and end of each span, so that spans
     /// measure GPU time. This makes generation slower. Use it only to trace.
     pub sync_spans: bool,
@@ -181,6 +186,10 @@ impl Engine {
         let start = Instant::now();
         let _load = tracing::info_span!("load").entered();
         let sync = load_config.sync_spans;
+        // Candle's fused attention has no CPU kernel.
+        if load_config.attention == AttentionKind::Fused && load_config.device == DeviceKind::Cpu {
+            return Err(Error::FusedAttentionNeedsMetal);
+        }
         // Without the `metal` feature, new_metal returns an error.
         let device = match load_config.device {
             DeviceKind::Cpu => Device::Cpu,
@@ -218,10 +227,11 @@ impl Engine {
         };
         // model.rs (a copy of Candle's Qwen2) builds the embedding, the 24
         // layers and the output head from those tensors.
-        let model = {
+        let mut model = {
             let _span = device_span!(&device, sync, "load.model")?;
             ModelForCausalLM::new(&config, vb, sync)?
         };
+        model.set_attention(load_config.attention);
 
         Ok(Engine {
             model,
@@ -374,5 +384,24 @@ mod tests {
             assert_eq!(d.to_string().parse::<DeviceKind>(), Ok(d));
         }
         assert!("cuda".parse::<DeviceKind>().is_err());
+    }
+
+    #[test]
+    fn fused_attention_on_the_cpu_is_an_error() {
+        let config = LoadConfig {
+            model_dir: PathBuf::from("does-not-exist"),
+            dtype: Dtype::F16,
+            device: DeviceKind::Cpu,
+            max_new_tokens: 1,
+            batch: 1,
+            kv_cache: KvCacheKind::default(),
+            attention: AttentionKind::Fused,
+            sync_spans: false,
+            ignore_eos: false,
+        };
+        assert!(matches!(
+            Engine::load(&config),
+            Err(Error::FusedAttentionNeedsMetal)
+        ));
     }
 }

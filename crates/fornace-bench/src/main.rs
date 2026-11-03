@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser};
-use fornace_engine::{DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig};
+use fornace_engine::{AttentionKind, DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig};
 use serde::{Deserialize, Serialize};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -42,6 +42,10 @@ struct Args {
     /// The KV caches, separated by commas: cat, cat-contiguous, or prealloc.
     #[arg(long, value_delimiter = ',', default_value = "prealloc")]
     kv_cache: Vec<KvCacheKind>,
+    /// The attention: naive or fused. A row with fused attention has
+    /// `attention=fused` in the tag column.
+    #[arg(long, default_value = "naive")]
+    attention: AttentionKind,
     /// The device: cpu or metal.
     #[arg(long, default_value = DEFAULT_DEVICE)]
     device: DeviceKind,
@@ -168,6 +172,7 @@ fn run_worker(
         .args(["--prompts", &prompts])
         .args(["--dtypes", &dtype.to_string()])
         .args(["--kv-cache", &kv_cache.to_string()])
+        .args(["--attention", &args.attention.to_string()])
         .args(["--device", &args.device.to_string()])
         .args(["--max-new-tokens", &args.max_new_tokens.to_string()])
         .args(["--repeats", &args.repeats.to_string()])
@@ -201,6 +206,7 @@ fn worker(args: &Args) -> Result<()> {
         max_new_tokens: args.max_new_tokens,
         batch: 1,
         kv_cache: args.kv_cache[0],
+        attention: args.attention,
         sync_spans: false,
         ignore_eos: args.ignore_eos,
     };
@@ -245,7 +251,7 @@ fn worker(args: &Args) -> Result<()> {
                 decode_ms_mean_last64: decode_ms_mean_last64(&report.decode_token_ms),
                 peak_mem_mb: peak_mem_mb(report.peak_memory_bytes),
                 quality: String::new(),
-                tag: args.tag.clone(),
+                tag: row_tag(&args.tag, config.attention),
             };
             eprintln!(
                 "{} {} {} run {run}/{}: {:.1} decode tok/s",
@@ -256,6 +262,20 @@ fn worker(args: &Args) -> Result<()> {
     }
     writer.flush()?;
     Ok(())
+}
+
+/// The tag column: the --tag text, plus `attention=fused` if the attention
+/// is not the default.
+fn row_tag(tag: &str, attention: AttentionKind) -> String {
+    if attention == AttentionKind::default() {
+        return tag.to_string();
+    }
+    let attention = format!("attention={attention}");
+    if tag.is_empty() {
+        attention
+    } else {
+        format!("{tag}; {attention}")
+    }
 }
 
 /// Appends rows to the CSV file. A new or empty file gets the header first.
@@ -392,6 +412,17 @@ mod tests {
             quality: String::new(),
             tag: "after-4077".to_string(),
         }
+    }
+
+    #[test]
+    fn row_tag_names_only_the_fused_attention() {
+        assert_eq!(row_tag("", AttentionKind::Naive), "");
+        assert_eq!(row_tag("run 2", AttentionKind::Naive), "run 2");
+        assert_eq!(row_tag("", AttentionKind::Fused), "attention=fused");
+        assert_eq!(
+            row_tag("run 2", AttentionKind::Fused),
+            "run 2; attention=fused"
+        );
     }
 
     #[test]

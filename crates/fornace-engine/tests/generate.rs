@@ -19,6 +19,7 @@ fn greedy_decode_names_the_capital_of_spain() {
         max_new_tokens: 8,
         batch: 1,
         kv_cache: Default::default(),
+        attention: Default::default(),
         sync_spans: false,
         ignore_eos: false,
     };

@@ -12,6 +12,8 @@
 //!   model starts with `Cat`, which is the original code. `Engine` resets
 //!   the cache to `LoadConfig::kv_cache` (default `Prealloc`) before each
 //!   generation.
+//! - a choice of attention (`AttentionKind`), set with `set_attention`. A
+//!   new model starts with `Naive`, which is the original code.
 //!
 //! The original documentation follows.
 //!
@@ -36,8 +38,76 @@ use candle_nn::{Activation, VarBuilder};
 use candle_transformers::models::with_tracing::{Linear, RmsNorm, linear, linear_no_bias};
 use std::sync::Arc;
 
+use std::fmt;
+use std::str::FromStr;
+
 use crate::cache::{KvCacheKind, LayerCache};
 use crate::trace::device_debug_span;
+
+/// How each attention layer computes softmax(QK^T * scale)V.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttentionKind {
+    /// Repeat K and V for each query head, then use matmul and softmax.
+    /// This builds the [heads, q_len, kv_len] score matrix in each layer.
+    /// This is what Candle's Qwen2 does.
+    #[default]
+    Naive,
+    /// Candle's fused Metal kernel (`candle_nn::ops::sdpa`). It uses the
+    /// grouped KV heads directly and does not build the score matrix. Metal
+    /// only.
+    Fused,
+}
+
+impl FromStr for AttentionKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "naive" => Ok(AttentionKind::Naive),
+            "fused" => Ok(AttentionKind::Fused),
+            _ => Err(format!("unknown attention `{s}`: use naive or fused")),
+        }
+    }
+}
+
+impl fmt::Display for AttentionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AttentionKind::Naive => "naive",
+            AttentionKind::Fused => "fused",
+        })
+    }
+}
+
+/// Fused attention with `candle_nn::ops::sdpa`. `k` and `v` have the KV
+/// heads, not repeated. With `causal`, query i sees the keys up to
+/// i + kv_len - q_len, as the causal mask of the model does. The model's
+/// sliding window is not applied: for Qwen2.5 it equals
+/// `max_position_embeddings`, so it never masks a position.
+fn fused_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f64, causal: bool) -> Result<Tensor> {
+    candle_nn::ops::sdpa(
+        q,
+        &dense_rows(k)?,
+        &dense_rows(v)?,
+        None,
+        causal,
+        scale as f32,
+        1.0,
+    )
+}
+
+/// Returns `x` if each row of the last dimension is dense and the rows are
+/// next to each other, else a contiguous copy. The one-token kernel of
+/// `sdpa` reads K and V with only the head stride, and assumes this layout.
+/// The `Cat` cache gives V as a transposed view, which does not have it.
+fn dense_rows(x: &Tensor) -> Result<Tensor> {
+    let stride = x.stride();
+    if stride[3] == 1 && stride[2] == x.dim(3)? {
+        Ok(x.clone())
+    } else {
+        x.contiguous()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Config {
@@ -144,6 +214,7 @@ struct Attention {
     hidden_size: usize,
     rotary_emb: Arc<RotaryEmbedding>,
     kv_cache: LayerCache,
+    attention: AttentionKind,
     sync_spans: bool,
 }
 
@@ -175,6 +246,7 @@ impl Attention {
             hidden_size: hidden_sz,
             rotary_emb,
             kv_cache: LayerCache::new(KvCacheKind::Cat, 0),
+            attention: AttentionKind::Naive,
             sync_spans,
         })
     }
@@ -217,27 +289,37 @@ impl Attention {
             self.kv_cache.append(key_states, value_states)?
         };
 
-        let (key_states, value_states) = {
-            let _span = device_debug_span!(device, sync, "attn.repeat_kv")?;
-            let key_states = candle_transformers::utils::repeat_kv(key_states, self.num_kv_groups)?
-                .contiguous()?;
-            let value_states =
-                candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?
-                    .contiguous()?;
-            (key_states, value_states)
-        };
+        let scale = 1f64 / f64::sqrt(self.head_dim as f64);
+        let attn_output = match self.attention {
+            AttentionKind::Naive => {
+                let (key_states, value_states) = {
+                    let _span = device_debug_span!(device, sync, "attn.repeat_kv")?;
+                    let key_states =
+                        candle_transformers::utils::repeat_kv(key_states, self.num_kv_groups)?
+                            .contiguous()?;
+                    let value_states =
+                        candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?
+                            .contiguous()?;
+                    (key_states, value_states)
+                };
 
-        let attn_output = {
-            let _span = device_debug_span!(device, sync, "attn.sdpa")?;
-            let scale = 1f64 / f64::sqrt(self.head_dim as f64);
-            let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
+                let _span = device_debug_span!(device, sync, "attn.sdpa")?;
+                let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
 
-            let attn_weights = match attention_mask {
-                None => attn_weights,
-                Some(mask) => attn_weights.broadcast_add(mask)?,
-            };
-            let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-            attn_weights.matmul(&value_states)?
+                let attn_weights = match attention_mask {
+                    None => attn_weights,
+                    Some(mask) => attn_weights.broadcast_add(mask)?,
+                };
+                let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+                attn_weights.matmul(&value_states)?
+            }
+            AttentionKind::Fused => {
+                let _span = device_debug_span!(device, sync, "attn.sdpa")?;
+                if attention_mask.is_some() {
+                    candle_core::bail!("fused attention does not take an attention mask");
+                }
+                fused_attention(&query_states, &key_states, &value_states, scale, q_len > 1)?
+            }
         };
         let _span = device_debug_span!(device, sync, "attn.o_proj")?;
         attn_output
@@ -248,6 +330,10 @@ impl Attention {
 
     fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
         self.kv_cache = LayerCache::new(kind, capacity)
+    }
+
+    fn set_attention(&mut self, kind: AttentionKind) {
+        self.attention = kind
     }
 }
 
@@ -308,6 +394,10 @@ impl DecoderLayer {
     fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
         self.self_attn.reset_kv_cache(kind, capacity)
     }
+
+    fn set_attention(&mut self, kind: AttentionKind) {
+        self.self_attn.set_attention(kind)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +408,7 @@ pub struct Model {
     sliding_window: usize,
     device: Device,
     dtype: DType,
+    attention: AttentionKind,
     sync_spans: bool,
 }
 
@@ -341,6 +432,7 @@ impl Model {
             sliding_window: cfg.sliding_window,
             device: vb.device().clone(),
             dtype: vb.dtype(),
+            attention: AttentionKind::Naive,
             sync_spans,
         })
     }
@@ -401,7 +493,8 @@ impl Model {
             match attn_mask {
                 Some(mask) => Some(self.prepare_attention_mask(mask)?),
                 None => {
-                    if seq_len <= 1 {
+                    // The fused kernel applies the causal mask itself.
+                    if seq_len <= 1 || self.attention == AttentionKind::Fused {
                         None
                     } else {
                         Some(self.prepare_causal_attention_mask(b_size, seq_len, seqlen_offset)?)
@@ -427,6 +520,14 @@ impl Model {
     pub fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
         for layer in self.layers.iter_mut() {
             layer.reset_kv_cache(kind, capacity)
+        }
+    }
+
+    /// Sets how each attention layer computes attention.
+    pub fn set_attention(&mut self, kind: AttentionKind) {
+        self.attention = kind;
+        for layer in self.layers.iter_mut() {
+            layer.set_attention(kind)
         }
     }
 }
@@ -471,5 +572,92 @@ impl ModelForCausalLM {
     /// See [`Model::reset_kv_cache`].
     pub fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
         self.base_model.reset_kv_cache(kind, capacity)
+    }
+
+    /// See [`Model::set_attention`].
+    pub fn set_attention(&mut self, kind: AttentionKind) {
+        self.base_model.set_attention(kind)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attention_kind_round_trips_through_display_and_from_str() {
+        for kind in [AttentionKind::Naive, AttentionKind::Fused] {
+            assert_eq!(kind.to_string().parse::<AttentionKind>(), Ok(kind));
+        }
+        assert!("flash".parse::<AttentionKind>().is_err());
+    }
+
+    /// The layouts of K and V from each KV cache kind: contiguous, a narrow
+    /// view of a larger buffer (`Prealloc`), and a transposed view (`Cat`).
+    /// Only the transposed view needs a copy.
+    #[test]
+    fn dense_rows_copies_only_the_transposed_view() -> Result<()> {
+        let device = Device::Cpu;
+        let contiguous = Tensor::zeros((1, 2, 5, 8), DType::F32, &device)?;
+        let narrow = Tensor::zeros((1, 2, 9, 8), DType::F32, &device)?.narrow(2, 0, 5)?;
+        let transposed = Tensor::zeros((1, 5, 2, 8), DType::F32, &device)?.transpose(1, 2)?;
+        assert!(!narrow.is_contiguous());
+        assert_eq!(dense_rows(&contiguous)?.stride(), contiguous.stride());
+        assert_eq!(dense_rows(&narrow)?.stride(), narrow.stride());
+        assert_eq!(dense_rows(&transposed)?.stride(), [80, 40, 8, 1]);
+        Ok(())
+    }
+
+    /// The fused kernel gives the same result as matmul and softmax with a
+    /// causal mask, in F32, for a prefill, a chunk at an offset, and one
+    /// decode token, with the KV layouts of each cache kind.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn fused_attention_matches_the_reference_on_metal() -> Result<()> {
+        let device = Device::new_metal(0)?;
+        let (heads, kv_heads, head_dim, kv_len) = (14, 2, 64, 300);
+        let scale = 1f64 / (head_dim as f64).sqrt();
+        let reference = |q: &Tensor, k: &Tensor, v: &Tensor| -> Result<Tensor> {
+            let q_len = q.dim(2)?;
+            let k = candle_transformers::utils::repeat_kv(k.contiguous()?, heads / kv_heads)?;
+            let v = candle_transformers::utils::repeat_kv(v.contiguous()?, heads / kv_heads)?;
+            let offset = kv_len - q_len;
+            let mask: Vec<f32> = (0..q_len)
+                .flat_map(|i| {
+                    (0..kv_len).map(move |j| {
+                        if j > i + offset {
+                            f32::NEG_INFINITY
+                        } else {
+                            0.
+                        }
+                    })
+                })
+                .collect();
+            let mask = Tensor::from_slice(&mask, (1, 1, q_len, kv_len), q.device())?;
+            let w = (q.matmul(&k.t()?)? * scale)?.broadcast_add(&mask)?;
+            candle_nn::ops::softmax_last_dim(&w)?.matmul(&v)
+        };
+        for q_len in [kv_len, 100, 1] {
+            let q = Tensor::randn(0f32, 1., (1, heads, q_len, head_dim), &device)?;
+            let k = Tensor::randn(0f32, 1., (1, kv_heads, kv_len, head_dim), &device)?;
+            let v = Tensor::randn(0f32, 1., (1, kv_heads, kv_len, head_dim), &device)?;
+            let want = reference(&q, &k, &v)?;
+            let narrow = |x: &Tensor| -> Result<Tensor> {
+                Tensor::cat(&[x, &x.zeros_like()?], 2)?.narrow(2, 0, kv_len)
+            };
+            let transposed =
+                |x: &Tensor| -> Result<Tensor> { x.transpose(1, 2)?.contiguous()?.transpose(1, 2) };
+            let layouts = [
+                ("contiguous", k.clone(), v.clone()),
+                ("narrow", narrow(&k)?, narrow(&v)?),
+                ("transposed", transposed(&k)?, transposed(&v)?),
+            ];
+            for (layout, k, v) in layouts {
+                let got = fused_attention(&q, &k, &v, scale, q_len > 1)?;
+                let diff: f32 = (got - &want)?.abs()?.max_all()?.to_scalar()?;
+                assert!(diff < 1e-4, "q_len {q_len}, {layout}: max diff {diff}");
+            }
+        }
+        Ok(())
     }
 }
