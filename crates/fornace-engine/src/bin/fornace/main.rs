@@ -126,7 +126,9 @@ fn main() -> anyhow::Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("{}", report.text);
+        for text in &report.texts {
+            println!("{text}");
+        }
         println!();
         println!("prompt tokens:        {}", report.prompt_tokens);
         println!("generated tokens:     {}", report.generated_tokens);

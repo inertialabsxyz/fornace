@@ -28,8 +28,8 @@ fn greedy_decode_names_the_capital_of_spain() {
         .generate("The capital of Spain is")
         .expect("generate text");
     assert!(
-        report.text.trim_start().starts_with("Madrid"),
+        report.texts[0].trim_start().starts_with("Madrid"),
         "unexpected text: {:?}",
-        report.text
+        report.texts[0]
     );
 }
