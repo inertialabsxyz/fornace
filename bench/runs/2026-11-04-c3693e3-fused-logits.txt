@@ -1,0 +1,13 @@
+# commit c3693e3, 2026-11-04
+# FORNACE_MODEL_DIR=./models/qwen2.5-0.5b-instruct cargo test --release --features metal -p fornace-engine --test fused_attention -- --nocapture
+alice-512.txt: step 8: the top token changes, naive margin 0.1250, max diff 0.7344
+alice-512.txt: step 14: the top token changes, naive margin 0.6250, max diff 0.9766
+alice-512.txt: 512 tokens, max |naive - fused| = 0.8750 after the prefill, 2.0625 in 31 decode steps
+alice-2048.txt: step 7: the top token changes, naive margin 0.1250, max diff 0.3750
+alice-2048.txt: step 27: the top token changes, naive margin 0.0000, max diff 0.3750
+alice-2048.txt: 2048 tokens, max |naive - fused| = 0.5625 after the prefill, 0.8125 in 31 decode steps
+alice-4096.txt: step 1: the top token changes, naive margin 0.0000, max diff 0.4375
+alice-4096.txt: step 2: the top token changes, naive margin 0.1250, max diff 0.4531
+alice-4096.txt: step 10: the top token changes, naive margin 0.1875, max diff 0.8750
+alice-4096.txt: 4096 tokens, max |naive - fused| = 0.4375 after the prefill, 0.8750 in 31 decode steps
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.21s
