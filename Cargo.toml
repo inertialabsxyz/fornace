@@ -32,6 +32,6 @@ memory-stats = "1.2.0"
 # the cat-contiguous KV cache holds one score buffer for each layer.
 # Remove this patch when upstream Candle has the fix.
 [patch.crates-io]
-candle-core = { git = "https://github.com/inertialabsxyz/candle", rev = "fd66fe88df2220f8f9a78b20921237009e2a4c54" }
-candle-nn = { git = "https://github.com/inertialabsxyz/candle", rev = "fd66fe88df2220f8f9a78b20921237009e2a4c54" }
-candle-metal-kernels = { git = "https://github.com/inertialabsxyz/candle", rev = "fd66fe88df2220f8f9a78b20921237009e2a4c54" }
+candle-core = { git = "https://github.com/inertialabsxyz/candle", rev = "79fe58df4fd9c37f330a38272140fe515aff2e43" }
+candle-nn = { git = "https://github.com/inertialabsxyz/candle", rev = "79fe58df4fd9c37f330a38272140fe515aff2e43" }
+candle-metal-kernels = { git = "https://github.com/inertialabsxyz/candle", rev = "79fe58df4fd9c37f330a38272140fe515aff2e43" }
