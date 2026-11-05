@@ -171,10 +171,6 @@ batches: 4 copies of `alice-512`, and 4 different 512-token windows of
 - The top token changes only where the batch-1 margin between the two
   best logits (0.000 to 0.19) is smaller than the difference. Thus the
   text changes only at near-ties.
-- Through the engine, with the repeat penalty, 4 copies on Metal with
-  naive attention leave the batch-1 text after about 15 tokens. All 4
-  rows stay equal to each other. The cause is probably a near-tie, but
-  the engine does not return its logits, so this is not proven.
 
 ## Speed drifts between runs
 
@@ -231,6 +227,19 @@ The defaults give 1 warm-up, 3 recorded runs, and `--ignore-eos true`.
 Expected: for case A, the summary shows about 150 to 160 tok/s at batch 1
 and about 240 to 257 tok/s at batch 4, a ratio of about 1.6. In case C,
 batch 2 is below batch 1, and batch 8 is near 2.7× batch 1.
+
+The rerun in "Speed drifts between runs" (batch 1 alone in 3 processes,
+then batch 4 before batch 1):
+
+```sh
+for i in 1 2 3; do
+  fb --batch 1 --prompts bench/prompts/alice-512.txt --attention fused --tag "case A rerun; B=1 alone $i"
+done
+fb --batch 4,1 --prompts bench/prompts/alice-512.txt --attention fused --tag "case A rerun; order 4,1"
+```
+
+Expected: batch 1 is the same in all 4 commands, within 1 %. The ratio of
+batch 4 to batch 1 in the last command is about 1.6.
 
 The correctness test:
 
