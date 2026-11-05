@@ -1,0 +1,4 @@
+commit,date,engine,model,device,dtype,kv_cache,batch,prompt_file,prompt_tokens,generated_tokens,run,load_ms,prefill_tok_s,decode_tok_s,ttft_ms,decode_ms_mean_last64,peak_mem_mb,quality,tag
+bd42949,2026-11-04,fornace,qwen2.5-0.5b-instruct,metal,bf16,cat,1,alice-4096.txt,4097,128,1,1598.571167,1294.690782757587,23.41703278444515,3164.462167,43.501902359374995,14815.2,,
+bd42949,2026-11-04,fornace,qwen2.5-0.5b-instruct,metal,bf16,cat,1,alice-4096.txt,4097,128,2,1598.571167,1253.2307225825668,23.72291670645781,3269.1506249999998,42.41730075,14815.2,,
+bd42949,2026-11-04,fornace,qwen2.5-0.5b-instruct,metal,bf16,cat,1,alice-4096.txt,4097,128,3,1598.571167,1294.1784083532473,23.727248179693582,3165.715,42.421129562499985,14815.2,,
