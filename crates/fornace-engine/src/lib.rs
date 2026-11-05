@@ -354,7 +354,9 @@ impl Engine {
         let mut generated: Vec<Vec<u32>> = next.iter().map(|&t| vec![t]).collect();
 
         let mut decode_token_ms = Vec::with_capacity(self.load_config.max_new_tokens);
-        for (pos, _) in (prompt_tokens + 1..).zip(1..self.load_config.max_new_tokens) {
+        // The prompt fills positions 0 to T - 1. The token from the prefill
+        // goes in at position T.
+        for (pos, _) in (prompt_tokens..).zip(1..self.load_config.max_new_tokens) {
             let step = Instant::now();
             let _step = device_span!(&self.device, sync, "decode.step", pos)?;
             let logits = {

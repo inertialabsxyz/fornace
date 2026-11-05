@@ -15,8 +15,9 @@ pub fn decode_times(report: &GenerationReport) {
         println!("No decode steps to plot.");
         return;
     }
-    // decode_token_ms[i] is the token at position prompt_tokens + 1 + i.
-    let first_pos = report.prompt_tokens + 1;
+    // decode_token_ms[i] is the step that reads the token at position
+    // prompt_tokens + i.
+    let first_pos = report.prompt_tokens;
     let points: Vec<(f32, f32)> = times
         .iter()
         .enumerate()
