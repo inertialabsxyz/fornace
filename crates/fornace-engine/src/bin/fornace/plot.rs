@@ -6,8 +6,9 @@ use textplots::{Chart, Plot, Shape};
 /// The maximum number of rows in the table under the chart.
 const TABLE_ROWS: usize = 16;
 
-/// Draws the decode time of each token against its position, then a table
-/// of the mean time for each block of positions.
+/// Draws the time of each decode step against its position, then a table
+/// of the mean time for each block of positions. At batch B, one step makes
+/// one token for each of the B sequences.
 pub fn decode_times(report: &GenerationReport) {
     let times = &report.decode_token_ms;
     if times.is_empty() {
@@ -23,7 +24,10 @@ pub fn decode_times(report: &GenerationReport) {
         .collect();
     let last_pos = (first_pos + times.len() - 1) as f32;
 
-    println!("Decode time per token (ms) by position");
+    println!(
+        "Decode time per step (ms) by position, batch {}",
+        report.batch
+    );
     Chart::new(
         160,
         60,
