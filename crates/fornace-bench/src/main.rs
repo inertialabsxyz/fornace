@@ -1,12 +1,13 @@
 //! The `fornace-bench` command: run each engine and write one CSV row per run.
 //!
 //! The peak memory of a process cannot be reset (see `fornace_engine::metrics`).
-//! So the command starts itself again as a worker for each (dtype, KV cache)
-//! pair. Each worker loads the engine once and writes its rows to stdout as
-//! CSV. The parent appends the rows to the file and prints a summary.
+//! So the command starts itself again as a worker for each (dtype, KV cache,
+//! batch) set. Each worker loads the engine once and writes its rows to
+//! stdout as CSV. The parent appends the rows to the file and prints a summary.
 
 use std::error::Error;
 use std::fs::OpenOptions;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,6 +43,10 @@ struct Args {
     /// The KV caches, separated by commas: cat, cat-contiguous, or prealloc.
     #[arg(long, value_delimiter = ',', default_value = "prealloc")]
     kv_cache: Vec<KvCacheKind>,
+    /// The batch sizes, separated by commas. A batch of B runs B copies of
+    /// the prompt at the same time.
+    #[arg(long, value_delimiter = ',', default_value = "1")]
+    batch: Vec<NonZeroUsize>,
     /// The attention: naive or fused. A row with fused attention has
     /// `attention=fused` in the tag column.
     #[arg(long, default_value = "naive")]
@@ -78,7 +83,7 @@ struct Args {
     /// A note for the tag column.
     #[arg(long, value_name = "TEXT", default_value = "")]
     tag: String,
-    /// Run one (dtype, KV cache) pair and write the rows to stdout.
+    /// Run one (dtype, KV cache, batch) set and write the rows to stdout.
     #[arg(long, hide = true)]
     worker: bool,
     /// The commit for the rows. The parent gives it to each worker.
@@ -123,8 +128,8 @@ fn main() -> Result<()> {
     }
 }
 
-/// Starts one worker for each (dtype, KV cache) pair, appends the rows to
-/// the CSV file, and prints a summary table.
+/// Starts one worker for each (dtype, KV cache, batch) set, appends the
+/// rows to the CSV file, and prints a summary table.
 fn parent(args: &Args) -> Result<()> {
     let commit = git_commit();
     let date = today();
@@ -140,9 +145,11 @@ fn parent(args: &Args) -> Result<()> {
         }
         for dtype in &args.dtypes {
             for kv_cache in &args.kv_cache {
-                let new = run_worker(args, &commit, &date, *dtype, *kv_cache)?;
-                append_rows(&out, &new)?;
-                rows.extend(new);
+                for batch in &args.batch {
+                    let new = run_worker(args, &commit, &date, *dtype, *kv_cache, *batch)?;
+                    append_rows(&out, &new)?;
+                    rows.extend(new);
+                }
             }
         }
     }
@@ -151,13 +158,14 @@ fn parent(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Starts this program again as a worker for one pair and reads its rows.
+/// Starts this program again as a worker for one set and reads its rows.
 fn run_worker(
     args: &Args,
     commit: &str,
     date: &str,
     dtype: Dtype,
     kv_cache: KvCacheKind,
+    batch: NonZeroUsize,
 ) -> Result<Vec<Row>> {
     let prompts = args
         .prompts
@@ -172,6 +180,7 @@ fn run_worker(
         .args(["--prompts", &prompts])
         .args(["--dtypes", &dtype.to_string()])
         .args(["--kv-cache", &kv_cache.to_string()])
+        .args(["--batch", &batch.to_string()])
         .args(["--attention", &args.attention.to_string()])
         .args(["--device", &args.device.to_string()])
         .args(["--max-new-tokens", &args.max_new_tokens.to_string()])
@@ -185,7 +194,7 @@ fn run_worker(
         .output()?;
     if !output.status.success() {
         return Err(format!(
-            "the worker for {dtype} {kv_cache} failed: {}",
+            "the worker for {dtype} {kv_cache} batch {batch} failed: {}",
             output.status
         )
         .into());
@@ -196,15 +205,16 @@ fn run_worker(
     Ok(reader.deserialize().collect::<csv::Result<_>>()?)
 }
 
-/// Loads the engine once for the first dtype and KV cache, runs each prompt,
-/// and writes one CSV row for each recorded generation to stdout.
+/// Loads the engine once for the first dtype, KV cache, and batch size. Runs
+/// each prompt as a batch of that many copies, and writes one CSV row for
+/// each recorded generation to stdout.
 fn worker(args: &Args) -> Result<()> {
     let config = LoadConfig {
         model_dir: args.model.clone(),
         dtype: args.dtypes[0],
         device: args.device,
         max_new_tokens: args.max_new_tokens,
-        batch: 1,
+        batch: args.batch[0].get(),
         kv_cache: args.kv_cache[0],
         attention: args.attention,
         sync_spans: false,
@@ -226,11 +236,12 @@ fn worker(args: &Args) -> Result<()> {
         let prompt = std::fs::read_to_string(prompt_path)
             .map_err(|e| format!("cannot read {}: {e}", prompt_path.display()))?;
         let prompt_file = file_name(prompt_path);
+        let prompts = vec![prompt.as_str(); config.batch];
         for _ in 0..args.warmup {
-            engine.generate(&prompt)?;
+            engine.generate_batch(&prompts)?;
         }
         for run in 1..=args.repeats {
-            let report = engine.generate(&prompt)?;
+            let report = engine.generate_batch(&prompts)?;
             let row = Row {
                 commit: args.commit.clone().unwrap_or_else(git_commit),
                 date: args.date.clone().unwrap_or_else(today),
@@ -239,7 +250,7 @@ fn worker(args: &Args) -> Result<()> {
                 device: config.device.to_string(),
                 dtype: dtype.to_string(),
                 kv_cache: config.kv_cache.to_string(),
-                batch: config.batch,
+                batch: report.batch,
                 prompt_file: prompt_file.clone(),
                 prompt_tokens: report.prompt_tokens,
                 generated_tokens: report.generated_tokens,
@@ -254,8 +265,8 @@ fn worker(args: &Args) -> Result<()> {
                 tag: row_tag(&args.tag, config.attention),
             };
             eprintln!(
-                "{} {} {} run {run}/{}: {:.1} decode tok/s",
-                row.dtype, row.kv_cache, row.prompt_file, args.repeats, row.decode_tok_s
+                "{} {} batch {} {} run {run}/{}: {:.1} decode tok/s total",
+                row.dtype, row.kv_cache, row.batch, row.prompt_file, args.repeats, row.decode_tok_s
             );
             writer.serialize(row)?;
         }
@@ -305,28 +316,36 @@ fn peak_mem_mb(bytes: u64) -> f64 {
     (bytes as f64 / 1_048_576.0 * 10.0).round() / 10.0
 }
 
-/// A Markdown table with one line for each (prompt, dtype, KV cache): the
-/// mean decode tok/s and the mean peak memory over the repeats.
+/// A Markdown table with one line for each (prompt, dtype, KV cache, batch):
+/// the mean total decode tok/s and the mean peak memory over the repeats.
 fn summary(rows: &[Row]) -> String {
     let mut groups: Vec<(&Row, Vec<&Row>)> = Vec::new();
     for row in rows {
-        let key = |r: &Row| (r.prompt_file.clone(), r.dtype.clone(), r.kv_cache.clone());
+        let key = |r: &Row| {
+            (
+                r.prompt_file.clone(),
+                r.dtype.clone(),
+                r.kv_cache.clone(),
+                r.batch,
+            )
+        };
         match groups.iter_mut().find(|(first, _)| key(first) == key(row)) {
             Some((_, group)) => group.push(row),
             None => groups.push((row, vec![row])),
         }
     }
     let mut out = String::from(
-        "| prompt | dtype | kv_cache | decode tok/s | peak MB |\n|---|---|---|---:|---:|\n",
+        "| prompt | dtype | kv_cache | batch | decode tok/s | peak MB |\n|---|---|---|---:|---:|---:|\n",
     );
     for (first, group) in groups {
         let mean =
             |f: fn(&Row) -> f64| group.iter().map(|r| f(r)).sum::<f64>() / group.len() as f64;
         out.push_str(&format!(
-            "| {} | {} | {} | {:.1} | {:.1} |\n",
+            "| {} | {} | {} | {} | {:.1} | {:.1} |\n",
             first.prompt_file,
             first.dtype,
             first.kv_cache,
+            first.batch,
             mean(|r| r.decode_tok_s),
             mean(|r| r.peak_mem_mb),
         ));
@@ -415,6 +434,17 @@ mod tests {
     }
 
     #[test]
+    fn batch_is_one_by_default_and_parses_a_list() {
+        let base = ["fornace-bench", "--model", "m"];
+        let args = Args::try_parse_from(base).unwrap();
+        assert_eq!(args.batch, [NonZeroUsize::MIN]);
+        let args = Args::try_parse_from(base.iter().chain(&["--batch", "1,2,4"])).unwrap();
+        let sizes: Vec<usize> = args.batch.iter().map(|b| b.get()).collect();
+        assert_eq!(sizes, [1, 2, 4]);
+        assert!(Args::try_parse_from(base.iter().chain(&["--batch", "1,0"])).is_err());
+    }
+
+    #[test]
     fn row_tag_names_only_the_fused_attention() {
         assert_eq!(row_tag("", AttentionKind::Naive), "");
         assert_eq!(row_tag("run 2", AttentionKind::Naive), "run 2");
@@ -492,13 +522,17 @@ mod tests {
         let mut other = row();
         other.kv_cache = "cat".to_string();
         other.decode_tok_s = 58.0;
-        let table = summary(&[row(), second, other]);
+        let mut batched = row();
+        batched.batch = 4;
+        batched.decode_tok_s = 400.0;
+        let table = summary(&[row(), second, other, batched]);
         assert_eq!(
             table,
-            "| prompt | dtype | kv_cache | decode tok/s | peak MB |\n\
-             |---|---|---|---:|---:|\n\
-             | alice-512.txt | bf16 | prealloc | 120.1 | 1235.5 |\n\
-             | alice-512.txt | bf16 | cat | 58.0 | 1234.5 |\n"
+            "| prompt | dtype | kv_cache | batch | decode tok/s | peak MB |\n\
+             |---|---|---|---:|---:|---:|\n\
+             | alice-512.txt | bf16 | prealloc | 1 | 120.1 | 1235.5 |\n\
+             | alice-512.txt | bf16 | cat | 1 | 58.0 | 1234.5 |\n\
+             | alice-512.txt | bf16 | prealloc | 4 | 400.0 | 1234.5 |\n"
         );
     }
 }
