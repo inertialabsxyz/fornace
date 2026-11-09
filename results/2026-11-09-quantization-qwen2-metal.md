@@ -196,8 +196,8 @@ the work is the same. A unit test checks that each BF16 table value is the
 F32 value rounded once (`bf16_rope_tables_are_the_f32_tables_rounded_once`
 in `crates/fornace-engine/src/model.rs`). Candle's `qwen2.rs` has the same
 code. Candle PR #3520 (open) makes the same change, and these
-measurements are now on it. A text search finds the same pattern in about
-20 other Candle model files. Only Qwen2 was measured.
+measurements are now on it. A text search finds the same pattern in
+other Candle model files. Only Qwen2 was measured.
 
 **Candle's quantized Metal matmul ignores the start offset of its
 input.** For an input of more than one row, `fwd` in
