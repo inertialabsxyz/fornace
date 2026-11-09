@@ -38,7 +38,9 @@ struct Args {
     /// The maximum number of tokens to generate.
     #[arg(long, value_name = "N", default_value_t = 128)]
     max_new_tokens: usize,
-    /// The data type of the weights: f16, q8, or q4.
+    /// The data type of the weights: f16 (dense, BF16 on Metal and F32 on
+    /// the CPU), f32 (dense F32), q8 (Q8_0), or q4 (Q4_0). q8 and q4 need
+    /// the GGUF files from `make quantize`.
     #[arg(long, default_value = "f16")]
     dtype: Dtype,
     /// The device: cpu or metal.

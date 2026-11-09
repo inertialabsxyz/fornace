@@ -3,7 +3,7 @@ PROMPT ?= The capital of Spain is
 FEATURES ?= $(if $(filter Darwin,$(shell uname -s)),--features metal,)
 
 .DEFAULT_GOAL := help
-.PHONY: help check fmt fmt-check clippy test build run bench model
+.PHONY: help check fmt fmt-check clippy test build run bench model quantize
 
 help: ## Show this help
 	@echo "Usage: make <target> [MODEL=dir] [PROMPT=text]"
@@ -35,6 +35,10 @@ run: ## Generate text from PROMPT with the model in MODEL
 
 bench: ## Run the benchmark harness on the model in MODEL
 	cargo run --release $(FEATURES) -p fornace-bench -- --model $(MODEL)
+
+quantize: ## Write Q8_0 and Q4_0 GGUF files next to the model in MODEL
+	cargo run --release -p fornace-engine --bin fornace-quantize -- --model $(MODEL) --dtype q8
+	cargo run --release -p fornace-engine --bin fornace-quantize -- --model $(MODEL) --dtype q4
 
 model: ## Download Qwen2.5-0.5B-Instruct to ./models/qwen2.5-0.5b-instruct
 	scripts/get-model.sh

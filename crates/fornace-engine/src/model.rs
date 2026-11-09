@@ -14,6 +14,13 @@
 //!   generation.
 //! - a choice of attention (`AttentionKind`), set with `set_attention`. A
 //!   new model starts with `Naive`, which is the original code.
+//! - quantized weights from a GGUF file (`ModelForCausalLM::new_quantized`).
+//!   Each projection, the embedding, and `lm_head` are then Q8_0 or Q4_0,
+//!   and the model computes in F32, because Candle's quantized matmuls take
+//!   F32 input. The norms use `candle_nn::RmsNorm`, which the
+//!   `with_tracing` version wraps, so the dense model does not change.
+//! - `ModelForCausalLM::hidden_states` and `ModelForCausalLM::lm_head`, to
+//!   get the logits at every position (for perplexity).
 //!
 //! The original documentation follows.
 //!
@@ -33,9 +40,12 @@
 //! - 🤗 [Qwen2 Model](https://huggingface.co/Qwen/Qwen2-7B)
 //!
 
+use candle_core::quantized::QMatMul;
 use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
-use candle_nn::{Activation, VarBuilder};
-use candle_transformers::models::with_tracing::{Linear, RmsNorm, linear, linear_no_bias};
+use candle_nn::{Activation, RmsNorm, VarBuilder};
+use candle_transformers::models::with_tracing::{Linear, linear, linear_no_bias};
+use candle_transformers::quantized_nn;
+use candle_transformers::quantized_var_builder::VarBuilder as QVarBuilder;
 use std::sync::Arc;
 
 use std::fmt;
@@ -76,6 +86,96 @@ impl fmt::Display for AttentionKind {
             AttentionKind::Naive => "naive",
             AttentionKind::Fused => "fused",
         })
+    }
+}
+
+/// Where the weights come from: a dense safetensors file, or a GGUF file
+/// with quantized weights.
+#[derive(Clone)]
+enum Weights<'a> {
+    Dense(VarBuilder<'a>),
+    Quantized(QVarBuilder),
+}
+
+impl Weights<'_> {
+    fn pp<S: ToString>(&self, s: S) -> Self {
+        match self {
+            Weights::Dense(vb) => Weights::Dense(vb.pp(s)),
+            Weights::Quantized(vb) => Weights::Quantized(vb.pp(s)),
+        }
+    }
+
+    fn device(&self) -> &Device {
+        match self {
+            Weights::Dense(vb) => vb.device(),
+            Weights::Quantized(vb) => vb.device(),
+        }
+    }
+
+    /// The dtype of the activations. Quantized matmuls take F32 input.
+    fn compute_dtype(&self) -> DType {
+        match self {
+            Weights::Dense(vb) => vb.dtype(),
+            Weights::Quantized(_) => DType::F32,
+        }
+    }
+
+    fn proj(&self, in_dim: usize, out_dim: usize, bias: bool) -> Result<Proj> {
+        Ok(match (self, bias) {
+            (Weights::Dense(vb), true) => Proj::Dense(linear(in_dim, out_dim, vb.clone())?),
+            (Weights::Dense(vb), false) => {
+                Proj::Dense(linear_no_bias(in_dim, out_dim, vb.clone())?)
+            }
+            (Weights::Quantized(vb), true) => {
+                Proj::Quantized(quantized_nn::linear(in_dim, out_dim, vb.clone())?)
+            }
+            (Weights::Quantized(vb), false) => {
+                Proj::Quantized(quantized_nn::linear_no_bias(in_dim, out_dim, vb.clone())?)
+            }
+        })
+    }
+
+    fn rms_norm(&self, size: usize, eps: f64) -> Result<RmsNorm> {
+        match self {
+            Weights::Dense(vb) => candle_nn::rms_norm(size, eps, vb.clone()),
+            Weights::Quantized(vb) => {
+                let weight = vb.get(size, "weight")?.dequantize(vb.device())?;
+                Ok(RmsNorm::new(weight, eps))
+            }
+        }
+    }
+}
+
+/// A projection with dense or quantized weights.
+#[derive(Debug, Clone)]
+enum Proj {
+    Dense(Linear),
+    Quantized(quantized_nn::Linear),
+}
+
+impl Module for Proj {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Proj::Dense(p) => p.forward(xs),
+            Proj::Quantized(p) => p.forward(xs),
+        }
+    }
+}
+
+/// The token embedding. The quantized version reads only the rows of the
+/// ids from the quantized table, and returns F32.
+#[derive(Debug, Clone)]
+enum Embedding {
+    Dense(candle_nn::Embedding),
+    Quantized(QMatMul),
+}
+
+impl Module for Embedding {
+    fn forward(&self, ids: &Tensor) -> Result<Tensor> {
+        match self {
+            Embedding::Dense(e) => e.forward(ids),
+            Embedding::Quantized(e) => e.embedding(ids),
+        }
     }
 }
 
@@ -171,19 +271,19 @@ impl RotaryEmbedding {
 #[derive(Debug, Clone)]
 #[allow(clippy::upper_case_acronyms)]
 struct MLP {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    gate_proj: Proj,
+    up_proj: Proj,
+    down_proj: Proj,
     act_fn: Activation,
 }
 
 impl MLP {
-    fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Config, vb: Weights) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
         let intermediate_sz = cfg.intermediate_size;
-        let gate_proj = linear_no_bias(hidden_sz, intermediate_sz, vb.pp("gate_proj"))?;
-        let up_proj = linear_no_bias(hidden_sz, intermediate_sz, vb.pp("up_proj"))?;
-        let down_proj = linear_no_bias(intermediate_sz, hidden_sz, vb.pp("down_proj"))?;
+        let gate_proj = vb.pp("gate_proj").proj(hidden_sz, intermediate_sz, false)?;
+        let up_proj = vb.pp("up_proj").proj(hidden_sz, intermediate_sz, false)?;
+        let down_proj = vb.pp("down_proj").proj(intermediate_sz, hidden_sz, false)?;
         Ok(Self {
             gate_proj,
             up_proj,
@@ -203,10 +303,10 @@ impl Module for MLP {
 
 #[derive(Debug, Clone)]
 struct Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: Proj,
+    k_proj: Proj,
+    v_proj: Proj,
+    o_proj: Proj,
     num_heads: usize,
     num_kv_heads: usize,
     num_kv_groups: usize,
@@ -222,7 +322,7 @@ impl Attention {
     fn new(
         rotary_emb: Arc<RotaryEmbedding>,
         cfg: &Config,
-        vb: VarBuilder,
+        vb: Weights,
         sync_spans: bool,
     ) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
@@ -230,10 +330,18 @@ impl Attention {
         let num_kv_heads = cfg.num_key_value_heads;
         let num_kv_groups = num_heads / num_kv_heads;
         let head_dim = hidden_sz / num_heads;
-        let q_proj = linear(hidden_sz, num_heads * head_dim, vb.pp("q_proj"))?;
-        let k_proj = linear(hidden_sz, num_kv_heads * head_dim, vb.pp("k_proj"))?;
-        let v_proj = linear(hidden_sz, num_kv_heads * head_dim, vb.pp("v_proj"))?;
-        let o_proj = linear_no_bias(num_heads * head_dim, hidden_sz, vb.pp("o_proj"))?;
+        let q_proj = vb
+            .pp("q_proj")
+            .proj(hidden_sz, num_heads * head_dim, true)?;
+        let k_proj = vb
+            .pp("k_proj")
+            .proj(hidden_sz, num_kv_heads * head_dim, true)?;
+        let v_proj = vb
+            .pp("v_proj")
+            .proj(hidden_sz, num_kv_heads * head_dim, true)?;
+        let o_proj = vb
+            .pp("o_proj")
+            .proj(num_heads * head_dim, hidden_sz, false)?;
         Ok(Self {
             q_proj,
             k_proj,
@@ -350,18 +458,17 @@ impl DecoderLayer {
     fn new(
         rotary_emb: Arc<RotaryEmbedding>,
         cfg: &Config,
-        vb: VarBuilder,
+        vb: Weights,
         sync_spans: bool,
     ) -> Result<Self> {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"), sync_spans)?;
         let mlp = MLP::new(cfg, vb.pp("mlp"))?;
-        let input_layernorm =
-            RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            vb.pp("post_attention_layernorm"),
-        )?;
+        let input_layernorm = vb
+            .pp("input_layernorm")
+            .rms_norm(cfg.hidden_size, cfg.rms_norm_eps)?;
+        let post_attention_layernorm = vb
+            .pp("post_attention_layernorm")
+            .rms_norm(cfg.hidden_size, cfg.rms_norm_eps)?;
         Ok(Self {
             self_attn,
             mlp,
@@ -402,7 +509,7 @@ impl DecoderLayer {
 
 #[derive(Debug, Clone)]
 pub struct Model {
-    embed_tokens: candle_nn::Embedding,
+    embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     sliding_window: usize,
@@ -413,25 +520,28 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(cfg: &Config, vb: VarBuilder, sync_spans: bool) -> Result<Self> {
+    /// Builds the model. `embed_tokens` is the token embedding, built by
+    /// the caller, because `lm_head` can share its weights.
+    fn new(cfg: &Config, vb: Weights, embed_tokens: Embedding, sync_spans: bool) -> Result<Self> {
         let vb_m = vb.pp("model");
-        let embed_tokens =
-            candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
-        let rotary_emb = Arc::new(RotaryEmbedding::new(vb.dtype(), cfg, vb_m.device())?);
+        let dtype = vb.compute_dtype();
+        let rotary_emb = Arc::new(RotaryEmbedding::new(dtype, cfg, vb_m.device())?);
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_l = vb_m.pp("layers");
         for layer_idx in 0..cfg.num_hidden_layers {
             let layer = DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx), sync_spans)?;
             layers.push(layer)
         }
-        let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
+        let norm = vb_m
+            .pp("norm")
+            .rms_norm(cfg.hidden_size, cfg.rms_norm_eps)?;
         Ok(Self {
             embed_tokens,
             layers,
             norm,
             sliding_window: cfg.sliding_window,
             device: vb.device().clone(),
-            dtype: vb.dtype(),
+            dtype,
             attention: AttentionKind::Naive,
             sync_spans,
         })
@@ -535,32 +645,79 @@ impl Model {
 #[derive(Debug, Clone)]
 pub struct ModelForCausalLM {
     base_model: Model,
-    lm_head: Linear,
+    lm_head: Proj,
 }
 
 impl ModelForCausalLM {
-    /// Builds the model. When `sync_spans` is true, each trace span inside
-    /// the model waits for the device when it starts and ends. See
-    /// `LoadConfig::sync_spans`.
+    /// Builds the model from dense weights. When `sync_spans` is true, each
+    /// trace span inside the model waits for the device when it starts and
+    /// ends. See `LoadConfig::sync_spans`.
     pub fn new(cfg: &Config, vb: VarBuilder, sync_spans: bool) -> Result<Self> {
-        let base_model = Model::new(cfg, vb.clone(), sync_spans)?;
+        let embeddings = vb
+            .pp("model.embed_tokens")
+            .get((cfg.vocab_size, cfg.hidden_size), "weight")?;
+        let embed_tokens = Embedding::Dense(candle_nn::Embedding::new(
+            embeddings.clone(),
+            cfg.hidden_size,
+        ));
         let lm_head = if vb.contains_tensor("lm_head.weight") {
-            linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?
+            Proj::Dense(linear_no_bias(
+                cfg.hidden_size,
+                cfg.vocab_size,
+                vb.pp("lm_head"),
+            )?)
         } else {
-            Linear::from_weights(base_model.embed_tokens.embeddings().clone(), None)
+            Proj::Dense(Linear::from_weights(embeddings, None))
         };
+        let base_model = Model::new(cfg, Weights::Dense(vb), embed_tokens, sync_spans)?;
         Ok(Self {
             base_model,
             lm_head,
         })
     }
 
+    /// Builds the model from quantized weights in a GGUF file, as written
+    /// by `fornace-quantize`. The tied embedding and `lm_head` share one
+    /// quantized tensor. The model computes in F32.
+    pub fn new_quantized(cfg: &Config, vb: QVarBuilder, sync_spans: bool) -> Result<Self> {
+        let embeddings = vb
+            .pp("model.embed_tokens")
+            .get((cfg.vocab_size, cfg.hidden_size), "weight")?;
+        let embed_tokens = Embedding::Quantized(QMatMul::from_arc(embeddings.clone())?);
+        let lm_head = if vb.contains_key("lm_head.weight") {
+            Proj::Quantized(quantized_nn::linear_no_bias(
+                cfg.hidden_size,
+                cfg.vocab_size,
+                vb.pp("lm_head"),
+            )?)
+        } else {
+            Proj::Quantized(quantized_nn::Linear::from_arc(embeddings, None)?)
+        };
+        let base_model = Model::new(cfg, Weights::Quantized(vb), embed_tokens, sync_spans)?;
+        Ok(Self {
+            base_model,
+            lm_head,
+        })
+    }
+
+    /// The logits of the last position of each row: `[batch, 1, vocab]`.
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
         let (_b_size, seq_len) = input_ids.dims2()?;
         let xs = self
-            .base_model
-            .forward(input_ids, seqlen_offset, None)?
+            .hidden_states(input_ids, seqlen_offset)?
             .narrow(1, seq_len - 1, 1)?;
+        self.lm_head(&xs)
+    }
+
+    /// The hidden states after the last norm, at every position:
+    /// `[batch, seq, hidden]`. This adds the positions to the KV cache, as
+    /// `forward` does.
+    pub fn hidden_states(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
+        self.base_model.forward(input_ids, seqlen_offset, None)
+    }
+
+    /// Applies `lm_head` to hidden states: `[.., hidden]` to `[.., vocab]`.
+    pub fn lm_head(&self, xs: &Tensor) -> Result<Tensor> {
         let _span = device_debug_span!(
             &self.base_model.device,
             self.base_model.sync_spans,
