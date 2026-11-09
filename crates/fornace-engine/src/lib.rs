@@ -352,12 +352,9 @@ impl Engine {
         let mut nll = 0f64;
         for start in (0..predicted).step_by(CHUNK) {
             let len = CHUNK.min(predicted - start);
-            // `force_contiguous` copies the chunk to a new buffer at offset
-            // 0. Candle's quantized Metal matmul for more than one row
-            // ignores the start offset of its input (`quantized/metal.rs`,
-            // `fwd`), so a narrow view reads the first rows again.
-            // `Tensor::copy` keeps the offset, so it does not help.
-            let rows = hidden.narrow(0, start, len)?.force_contiguous()?;
+            // A narrow view has a start offset. The quantized `lm_head`
+            // copies it to offset 0 (see `Proj` in `model.rs`).
+            let rows = hidden.narrow(0, start, len)?;
             let logits = self.model.lm_head(&rows)?.to_dtype(DType::F32)?;
             let log_probs = candle_nn::ops::log_softmax(&logits, D::Minus1)?;
             nll += quality::nll_sum(&log_probs, &targets.narrow(0, start, len)?)?;

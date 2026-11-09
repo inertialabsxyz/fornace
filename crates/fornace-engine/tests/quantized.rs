@@ -96,12 +96,9 @@ fn top_tokens(model: &mut ModelForCausalLM, prompt: &[u32], device: &Device) -> 
     let mut top = Vec::with_capacity(prompt.len());
     for start in (0..prompt.len()).step_by(CHUNK) {
         let len = CHUNK.min(prompt.len() - start);
-        // See `metal_quantized_matmul_needs_a_chunk_at_offset_zero`.
-        let rows = hidden
-            .narrow(0, start, len)
-            .unwrap()
-            .force_contiguous()
-            .unwrap();
+        // The quantized `lm_head` copies a view with an offset to offset
+        // 0. See `metal_quantized_matmul_needs_a_chunk_at_offset_zero`.
+        let rows = hidden.narrow(0, start, len).unwrap();
         let logits = model.lm_head(&rows).unwrap().to_dtype(DType::F32).unwrap();
         top.extend(logits.argmax(D::Minus1).unwrap().to_vec1::<u32>().unwrap());
     }
@@ -289,8 +286,8 @@ fn q8_logits_track_f32_on_the_cpu() {
 /// Candle's quantized Metal matmul for more than one row builds a new
 /// layout for its input, and so ignores the start offset of a narrow view
 /// (`candle-core/src/quantized/metal.rs`, `fwd`, at fork `79fe58df`).
-/// `Tensor::copy` keeps the offset. `Engine::perplexity` uses
-/// `force_contiguous`, which copies to a new buffer at offset 0. This test
+/// `Tensor::copy` keeps the offset. The quantized projection in `model.rs`
+/// uses `force_contiguous`, which copies to a new buffer at offset 0. This test
 /// checks that such a chunk gives the rows of the full matmul. It prints
 /// whether a narrow view still gives the first rows. No model needed.
 #[cfg(feature = "metal")]
@@ -326,6 +323,50 @@ fn metal_quantized_matmul_needs_a_chunk_at_offset_zero() {
     if near(&view, &full[..len]) {
         eprintln!("candle still ignores the input offset: a view of rows 4 to 7 gave rows 0 to 3");
     } else if near(&view, &full[start..]) {
-        eprintln!("candle now uses the input offset: the force_contiguous in perplexity can go");
+        eprintln!("candle now uses the input offset: the copy in the quantized projection can go");
+    }
+}
+
+/// A quantized batch runs, and each row gives the text of batch 1. At
+/// decode, `lm_head` gets the last position of each row as a strided view,
+/// which Candle's quantized matmul does not accept as it is.
+#[cfg(feature = "metal")]
+#[test]
+fn a_quantized_batch_gives_the_text_of_batch_one() {
+    use fornace_engine::{AttentionKind, DeviceKind, Engine, LoadConfig};
+
+    let Ok(dir) = std::env::var("FORNACE_MODEL_DIR") else {
+        eprintln!("skipped: FORNACE_MODEL_DIR is not set");
+        return;
+    };
+    let dir = Path::new(&dir);
+    for dtype in [Dtype::Q8, Dtype::Q4] {
+        if !gguf_path(dir, dtype).unwrap().exists() {
+            eprintln!("skipped {dtype}: the GGUF file is missing");
+            continue;
+        }
+        let mut engine = Engine::load(&LoadConfig {
+            model_dir: dir.to_path_buf(),
+            dtype,
+            device: DeviceKind::Metal,
+            max_new_tokens: 16,
+            batch: 4,
+            kv_cache: KvCacheKind::Prealloc,
+            attention: AttentionKind::Fused,
+            sync_spans: false,
+            ignore_eos: true,
+        })
+        .unwrap();
+        let prompts = [
+            "The capital of Spain is",
+            "The capital of France is",
+            "The capital of Italy is",
+            "The capital of Japan is",
+        ];
+        let batch = engine.generate_batch(&prompts).unwrap();
+        for (prompt, text) in prompts.iter().zip(&batch.texts) {
+            let single = engine.generate(prompt).unwrap();
+            assert_eq!(&single.texts[0], text, "{dtype} {prompt:?}");
+        }
     }
 }

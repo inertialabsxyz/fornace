@@ -160,7 +160,18 @@ impl Module for Proj {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Proj::Dense(p) => p.forward(xs),
-            Proj::Quantized(p) => p.forward(xs),
+            // Candle's quantized matmul takes only contiguous input, and on
+            // Metal it ignores the start offset of an input with more than
+            // one row. A batch gives both: `lm_head` gets the last position
+            // of each row, `[batch, 1, hidden]`, as a strided view. So copy
+            // such an input to a new buffer at offset 0.
+            Proj::Quantized(p) => {
+                if xs.is_contiguous() && xs.layout().start_offset() == 0 {
+                    p.forward(xs)
+                } else {
+                    p.forward(&xs.force_contiguous()?)
+                }
+            }
         }
     }
 }
