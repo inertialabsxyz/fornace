@@ -37,7 +37,8 @@ struct Args {
         default_value = "bench/prompts/alice-512.txt,bench/prompts/alice-2048.txt,bench/prompts/alice-4096.txt"
     )]
     prompts: Vec<PathBuf>,
-    /// The data types of the weights, separated by commas: f16, q8, or q4.
+    /// The data types of the weights, separated by commas: f16 (dense, BF16
+    /// on Metal and F32 on the CPU), f32, q8 (Q8_0), or q4 (Q4_0).
     #[arg(long, value_delimiter = ',', default_value = "f16")]
     dtypes: Vec<Dtype>,
     /// The KV caches, separated by commas: cat, cat-contiguous, or prealloc.
@@ -83,6 +84,11 @@ struct Args {
     /// A note for the tag column.
     #[arg(long, value_name = "TEXT", default_value = "")]
     tag: String,
+    /// A text file for the quality column. Each worker computes the
+    /// perplexity of the model on it once, after its speed runs, and writes
+    /// it to each of its rows. The tag column gets `quality=<file name>`.
+    #[arg(long, value_name = "FILE")]
+    quality: Option<PathBuf>,
     /// Run one (dtype, KV cache, batch) set and write the rows to stdout.
     #[arg(long, hide = true)]
     worker: bool,
@@ -188,6 +194,11 @@ fn run_worker(
         .args(["--warmup", &args.warmup.to_string()])
         .args(["--ignore-eos", &args.ignore_eos.to_string()])
         .args(["--tag", &args.tag])
+        .args(
+            args.quality
+                .iter()
+                .flat_map(|q| [std::ffi::OsStr::new("--quality"), q.as_os_str()]),
+        )
         .args(["--commit", commit])
         .args(["--date", date])
         .stderr(Stdio::inherit())
@@ -229,9 +240,8 @@ fn worker(args: &Args) -> Result<()> {
         );
     }
     let model = file_name(&args.model);
-    let mut writer = csv::WriterBuilder::new()
-        .has_headers(false)
-        .from_writer(std::io::stdout());
+    let quality_file = args.quality.as_deref().map(file_name);
+    let mut rows = Vec::new();
     for prompt_path in &args.prompts {
         let prompt = std::fs::read_to_string(prompt_path)
             .map_err(|e| format!("cannot read {}: {e}", prompt_path.display()))?;
@@ -262,31 +272,50 @@ fn worker(args: &Args) -> Result<()> {
                 decode_ms_mean_last64: decode_ms_mean_last64(&report.decode_token_ms),
                 peak_mem_mb: peak_mem_mb(report.peak_memory_bytes),
                 quality: String::new(),
-                tag: row_tag(&args.tag, config.attention),
+                tag: row_tag(&args.tag, config.attention, quality_file.as_deref()),
             };
             eprintln!(
                 "{} {} batch {} {} run {run}/{}: {:.1} decode tok/s total",
                 row.dtype, row.kv_cache, row.batch, row.prompt_file, args.repeats, row.decode_tok_s
             );
-            writer.serialize(row)?;
+            rows.push(row);
         }
+    }
+    // After the speed runs, so that their peak memory does not include it.
+    if let Some(path) = &args.quality {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let perplexity = format!("{:.3}", engine.perplexity(&text)?);
+        eprintln!("{dtype} perplexity on {}: {perplexity}", file_name(path));
+        for row in &mut rows {
+            row.quality = perplexity.clone();
+        }
+    }
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(std::io::stdout());
+    for row in rows {
+        writer.serialize(row)?;
     }
     writer.flush()?;
     Ok(())
 }
 
 /// The tag column: the --tag text, plus `attention=fused` if the attention
-/// is not the default.
-fn row_tag(tag: &str, attention: AttentionKind) -> String {
-    if attention == AttentionKind::default() {
-        return tag.to_string();
-    }
-    let attention = format!("attention={attention}");
-    if tag.is_empty() {
-        attention
-    } else {
-        format!("{tag}; {attention}")
-    }
+/// is not the default, plus `quality=<file>` if there is a quality text.
+fn row_tag(tag: &str, attention: AttentionKind, quality: Option<&str>) -> String {
+    let attention =
+        (attention != AttentionKind::default()).then(|| format!("attention={attention}"));
+    let quality = quality.map(|q| format!("quality={q}"));
+    [
+        Some(tag.to_string()).filter(|t| !t.is_empty()),
+        attention,
+        quality,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("; ")
 }
 
 /// Appends rows to the CSV file. A new or empty file gets the header first.
@@ -446,13 +475,34 @@ mod tests {
 
     #[test]
     fn row_tag_names_only_the_fused_attention() {
-        assert_eq!(row_tag("", AttentionKind::Naive), "");
-        assert_eq!(row_tag("run 2", AttentionKind::Naive), "run 2");
-        assert_eq!(row_tag("", AttentionKind::Fused), "attention=fused");
+        assert_eq!(row_tag("", AttentionKind::Naive, None), "");
+        assert_eq!(row_tag("run 2", AttentionKind::Naive, None), "run 2");
+        assert_eq!(row_tag("", AttentionKind::Fused, None), "attention=fused");
         assert_eq!(
-            row_tag("run 2", AttentionKind::Fused),
+            row_tag("run 2", AttentionKind::Fused, None),
             "run 2; attention=fused"
         );
+    }
+
+    #[test]
+    fn row_tag_names_the_quality_text() {
+        assert_eq!(
+            row_tag("", AttentionKind::Naive, Some("alice-2048.txt")),
+            "quality=alice-2048.txt"
+        );
+        assert_eq!(
+            row_tag("case Q", AttentionKind::Fused, Some("alice-2048.txt")),
+            "case Q; attention=fused; quality=alice-2048.txt"
+        );
+    }
+
+    #[test]
+    fn quality_is_an_optional_file() {
+        let base = ["fornace-bench", "--model", "m"];
+        assert_eq!(Args::try_parse_from(base).unwrap().quality, None);
+        let args =
+            Args::try_parse_from(base.iter().chain(&["--quality", "bench/prompts/a.txt"])).unwrap();
+        assert_eq!(args.quality, Some(PathBuf::from("bench/prompts/a.txt")));
     }
 
     #[test]

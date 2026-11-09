@@ -19,7 +19,10 @@ cargo run --release -p fornace-bench -- \
   is `alice-512.txt`, `alice-2048.txt`, and `alice-4096.txt` in
   `bench/prompts/`.
 - `--dtypes <LIST>`: the data types of the weights, separated by commas:
-  `f16`, `q8`, or `q4`. The default is `f16`. See the `dtype` column.
+  `f16` (dense, BF16 on Metal and F32 on the CPU), `f32` (dense F32), `q8`
+  (Q8_0), or `q4` (Q4_0). The default is `f16`. `q8` and `q4` read
+  `model-q8_0.gguf` and `model-q4_0.gguf` in the model directory. Make them
+  with `make quantize`. See the `dtype` column.
 - `--kv-cache <LIST>`: the KV caches, separated by commas: `cat`,
   `cat-contiguous`, or `prealloc`. The default is `prealloc`.
 - `--batch <LIST>`: the batch sizes, separated by commas. A batch of B runs
@@ -42,6 +45,9 @@ cargo run --release -p fornace-bench -- \
 - `--out <CSV>`: the CSV file for the results. If it exists, the rows are
   appended. The default is `bench/runs/<date>-<commit>.csv`.
 - `--tag <TEXT>`: a note for the `tag` column.
+- `--quality <FILE>`: a text file for the `quality` column. Each process
+  computes the perplexity of the model on it once, after its recorded
+  runs, and writes it to each of its rows.
 
 On macOS, add `--features metal` to use the GPU.
 
@@ -78,7 +84,7 @@ The columns are in this order. Each row is one recorded generation.
 - `engine`: the engine name: `fornace`, `mistralrs`, or `llamacpp`.
 - `model`: the directory name of `--model`.
 - `device`: the device: `cpu` or `metal`.
-- `dtype`: the data type of the weights that the engine used. This can differ from `--dtypes`. Nothing is quantized today, so it is `bf16` on Metal and `f32` on the CPU.
+- `dtype`: the data type of the weights that the engine used: `bf16`, `f32`, `q8`, or `q4`. This can differ from `--dtypes`: `f16` gives `bf16` on Metal and `f32` on the CPU. With `q8` and `q4`, the model computes in F32.
 - `kv_cache`: the KV cache: `cat`, `cat-contiguous`, or `prealloc`.
 - `batch`: the number of sequences that run at the same time. See "Metrics for a batch".
 - `prompt_file`: the file name of the prompt.
@@ -91,5 +97,5 @@ The columns are in this order. Each row is one recorded generation.
 - `ttft_ms`: the time from the start to the first generated token of all sequences, in milliseconds.
 - `decode_ms_mean_last64`: the mean time of the last 64 decode steps, in milliseconds. One step makes one token for each sequence. If there are fewer than 64 steps, the mean of all steps.
 - `peak_mem_mb`: the peak memory of the process, in MiB, with one decimal. On macOS this is the physical footprint, which includes Metal buffers. On Linux it is the peak RSS. Each `dtype`, `kv_cache`, and `batch` runs in its own process, so the peak is for that set only. In one set, the peak of a prompt includes the prompts that ran before it.
-- `quality`: a quality score. This column is empty until quantization is added.
-- `tag`: the text of `--tag`, or empty.
+- `quality`: the perplexity of the model on the `--quality` text, with 3 decimals, or empty without `--quality`. Perplexity is exp of the mean of −log p(next token) over all tokens after the first, with no repeat penalty. Lower is better.
+- `tag`: the text of `--tag`, then `attention=fused` for fused attention, then `quality=<file name>` for the `--quality` text, separated by `; `. Empty if none applies.
