@@ -246,8 +246,9 @@ fn quantized_logits_track_f32_on_metal() {
         &device,
     );
     drop(bf16);
-    // Measured 2026-11-09 on alice-512 (512 positions): Q8 0.9863, Q4
-    // 0.6934, and dense BF16 0.8223. The floors are a few points below.
+    // Measured 2026-11-09 on alice-512 (512 positions): Q8 0.9863 and Q4
+    // 0.6934. Dense BF16 gave 0.9824 (0.8223 before the RoPE tables were
+    // computed in F32). The floors are a few points below.
     for (dtype, floor) in [(Dtype::Q8, 0.95), (Dtype::Q4, 0.65)] {
         let Some(mut model) = quantized(dir, &config, dtype, &device) else {
             continue;
