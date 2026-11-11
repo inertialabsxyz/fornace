@@ -116,6 +116,20 @@ and 583 MB. The rest goes to F32 activations and an F32 KV cache, which is
 twice the BF16 size. At 2,049 tokens, the saving falls to 125 MB and
 436 MB (119 and 416 MiB).
 
+**Prefill: F32 activations, not dequantization.** For a prompt, Candle
+uses `kernel_mul_mm_q4_0_f32` and `kernel_mul_mm_q8_0_f32`. Each kernel
+turns a weight tile into F16 in shared GPU memory. The kernel does not
+make an F32 copy of the weights. But it takes only F32 activations and
+gives F32 output (`fwd` in `candle-core/src/quantized/metal.rs`). No
+version takes BF16 activations. Thus the norms, attention, and KV cache
+also run in F32. Dense BF16 uses the MLX GEMM with BF16 input and output.
+The `f32` control row shows the cost of F32 activations: 5,315 tok/s of
+prefill against 6,055 for `bf16`. `q8` (5,881) and `q4` (5,832) are
+between the two. The smaller weight read gets back part of the F32 cost,
+but not all of it. At 129 tokens the weight read is the largest part, and
+the quantized formats are 6 % faster. At 2,049 tokens the F32 attention
+and cache are a larger part, and they are 8 to 9 % slower.
+
 **Long prompts: the F32 KV cache.** From 129 to 2,049 tokens, `q4` decode
 falls 17 % (314.2 → 260.1 tok/s) and `bf16` falls 5 % (159.0 →
 150.8 tok/s). The quantized step is shorter, and its F32 cache is twice
@@ -148,7 +162,9 @@ faster, uses 22 % less memory, and its perplexity is 0.4 % from F32. Use
 Q4 only if you need the speed or the memory: it decodes 1.85× faster and
 uses 48 % less memory, but on 3 positions in 10 its top token is not the
 F32 top token. Long prompts keep less of the gain, because the cache stays
-F32. If you run several sequences at once, a BF16 batch of 8 gives more
+F32. If you send long prompts and the time to first token is important,
+use BF16: at 2,049 tokens, its time to first token is 8 to 9 % shorter
+than Q8 or Q4. If you run several sequences at once, a BF16 batch of 8 gives more
 total tokens than Q4 at any batch size.
 
 ## Correctness
@@ -231,7 +247,8 @@ line, with a test: Candle PR #4105.
 - There is no task score. Perplexity and top-1 agreement do not show if a
   Q4 answer is still correct.
 - The quantized formats compute in F32. A Q8 or Q4 path with BF16
-  activations, or a quantized KV cache, was not measured.
+  activations, or a quantized KV cache, was not measured. Such a kernel
+  would probably remove the prefill gap. This is not tested.
 - The cause of the fixed cost of about 2.5 ms for each step is not
   separated into kernel launches and small ops.
 - Whether Candle's matrix-vector kernel can take several rows in one
