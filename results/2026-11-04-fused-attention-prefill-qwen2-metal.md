@@ -118,8 +118,8 @@ tokens are almost equal.
 - All runs are from one day, on one machine, with one model and one dtype
   (BF16).
 - The BF16 logit differences in "Correctness" include an error in the
-  RoPE tables of this commit: positions above 256 were not exact in BF16
-  (fixed in `5ea3a39`, see the quantization result). The speed and memory
+  RoPE tables of this commit: the positions, the frequencies, and the
+  angles were rounded to BF16 (fixed in `5ea3a39`, see the quantization result). The speed and memory
   numbers do not change.
 - The generated text changes at near-ties. This result does not measure
   the quality of the text on a task. Do that before fused attention

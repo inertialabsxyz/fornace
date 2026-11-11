@@ -22,8 +22,9 @@
 //! - `ModelForCausalLM::hidden_states` and `ModelForCausalLM::lm_head`, to
 //!   get the logits at every position (for perplexity).
 //! - the RoPE tables are computed in F32 and then converted to the compute
-//!   dtype. The original converts the positions to BF16 first, so positions
-//!   above 256 are not exact (`RotaryEmbedding::new`).
+//!   dtype. The original converts the positions and the frequencies to BF16
+//!   and computes the angles in BF16, so each angle is rounded
+//!   (`RotaryEmbedding::new`).
 //!
 //! The original documentation follows.
 //!
@@ -257,10 +258,11 @@ impl RotaryEmbedding {
             .collect();
         let inv_freq_len = inv_freq.len();
         // Compute the angles in F32, and convert only sin and cos to
-        // `dtype`. BF16 has an 8-bit mantissa: a position above 256 in BF16
-        // is not exact, so a late token would get the angle of a nearby
-        // position. On alice-2048, that gave a BF16 perplexity of 39.7
-        // against 12.5 in F32.
+        // `dtype`. BF16 has an 8-bit mantissa. If the positions, the
+        // frequencies, and their products were BF16, each angle would be
+        // rounded, and the error would grow with the position. Positions
+        // above 256 would also not be exact. On alice-2048, that gave a
+        // BF16 perplexity of 39.7 against 12.5 in F32.
         let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?;
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
             .to_dtype(DType::F32)?
@@ -782,9 +784,8 @@ mod tests {
     }
 
     /// In BF16, the sin and cos of each position are the F32 values, rounded
-    /// once. If the positions were BF16 before the angles, a position above
-    /// 256 would not be exact, and late tokens would get the angle of a
-    /// nearby position.
+    /// once. If the angles were computed in BF16, they would be rounded
+    /// before sin and cos, and late tokens would get the largest error.
     #[test]
     fn bf16_rope_tables_are_the_f32_tables_rounded_once() -> Result<()> {
         let f32 = rope(DType::F32)?;

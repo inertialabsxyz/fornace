@@ -10,9 +10,9 @@ Candle's Q8_0 and Q4_0 formats. Q8 gives 1.40× the decode speed and 22 %
 less memory for almost no quality loss. Q4 gives 1.85× and 48 % less
 memory, but its perplexity is 23 % higher. A batch of several sequences
 gains little from quantized weights, because Candle reads the weights again
-for each row. The work also found two bugs. BF16 RoPE tables put tokens
-after position 256 at the wrong angle, which made BF16 perplexity 3.2×
-worse at 2,048 tokens. And Candle's quantized Metal matmul ignores the
+for each row. The work also found two bugs. BF16 RoPE tables gave tokens
+the wrong angle, and the error grew with the position. This made BF16
+perplexity 3.2× worse at 2,048 tokens. And Candle's quantized Metal matmul ignores the
 start offset of its input.
 
 ## What was measured and how
@@ -172,14 +172,17 @@ the top token at each of the 512 prompt positions.
 
 ## Two bugs found during the work
 
-**BF16 RoPE tables put late tokens at the wrong angle.** RoPE rotates
-each token by an angle that depends on its position. Fornace's model code
-is a copy of Candle's `qwen2.rs`, which converts the positions to the
-compute dtype before it computes the angles. BF16 has an 8-bit mantissa,
-so a position above 256 is not exact: 257 becomes 256, and above 1,024
-the positions round in steps of 8. Thus late tokens get the angle of a
-nearby position. Commit `5ea3a39` computes the angles in F32 and converts
-only sin and cos to the compute dtype.
+**BF16 RoPE tables put tokens at the wrong angle.** RoPE rotates each
+token by an angle: the position times a frequency. Fornace's model code
+is a copy of Candle's `qwen2.rs`. It converts the positions and the
+frequencies to the compute dtype, and then computes the angles in that
+dtype. BF16 has an 8-bit mantissa, so each of the three values is
+rounded. The frequencies and the angles are rounded at every position.
+The positions are also rounded above 256: 257 becomes 256, and above
+1,024 the positions round in steps of 8. The angle error grows with the
+position, so late tokens get the largest error. Commit `5ea3a39`
+computes the angles in F32 and converts only sin and cos to the compute
+dtype.
 
 | Text | `f32` | `bf16` before (`819de0a`) | `bf16` after (`43e280a`) |
 |---|---:|---:|---:|
@@ -190,7 +193,10 @@ only sin and cos to the compute dtype.
 Perplexity, fused attention, Metal. Data:
 `bench/runs/2026-11-09-819de0a-43e280a-rope.csv`, committed in
 `b436a65`. The error grows with the
-length of the text, as rounded positions predict. After the fix, `bf16`
+length of the text, as a rounded angle predicts. At 129 tokens every
+position is exact, but the fix still changes the perplexity. Thus the
+position rounding is not the only cause. This result does not separate
+the three roundings. After the fix, `bf16`
 is within 0.9 % of `f32` at each length. Speed and memory do not change:
 the work is the same. A unit test checks that each BF16 table value is the
 F32 value rounded once (`bf16_rope_tables_are_the_f32_tables_rounded_once`
