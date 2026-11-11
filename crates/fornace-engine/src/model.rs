@@ -25,6 +25,10 @@
 //!   dtype. The original converts the positions and the frequencies to BF16
 //!   and computes the angles in BF16, so each angle is rounded
 //!   (`RotaryEmbedding::new`).
+//! - a paged KV cache (`KvCacheKind::Paged`, `reset_paged_kv_cache`). The
+//!   model owns the block tables. It gives each layer the write and read
+//!   slots of the step, and each layer gathers K and V before attention.
+//!   `fork_kv_cache` makes B rows that share the blocks of one prompt.
 //!
 //! The original documentation follows.
 //!
@@ -55,7 +59,10 @@ use std::sync::Arc;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::cache::{KvCacheKind, LayerCache};
+use crate::cache::{
+    BlockUsage, DEFAULT_BLOCK_SIZE, KvCacheKind, LayerCache, PagedCache, PagedStep, paged_step,
+    scatter_ids,
+};
 use crate::trace::device_debug_span;
 
 /// How each attention layer computes softmax(QK^T * scale)V.
@@ -211,13 +218,15 @@ fn fused_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f64, causal: bool)
     )
 }
 
-/// Returns `x` if each row of the last dimension is dense and the rows are
-/// next to each other, else a contiguous copy. The one-token kernel of
-/// `sdpa` reads K and V with only the head stride, and assumes this layout.
-/// The `Cat` cache gives V as a transposed view, which does not have it.
+/// Returns `x` if each row of the last dimension is dense, the rows are
+/// next to each other, and the batch stride is the head stride × the head
+/// count, else a contiguous copy. The one-token kernel of `sdpa` reads K
+/// and V with only the head stride, and assumes this layout. The `Cat`
+/// cache gives V as a transposed view, which does not have it.
 fn dense_rows(x: &Tensor) -> Result<Tensor> {
     let stride = x.stride();
-    if stride[3] == 1 && stride[2] == x.dim(3)? {
+    let batch_ok = x.dim(0)? == 1 || stride[0] == x.dim(1)? * stride[1];
+    if stride[3] == 1 && stride[2] == x.dim(3)? && batch_ok {
         Ok(x.clone())
     } else {
         x.contiguous()
@@ -385,6 +394,7 @@ impl Attention {
         xs: &Tensor,
         attention_mask: Option<&Tensor>,
         seqlen_offset: usize,
+        paged: Option<&PagedStep>,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
         let (device, sync) = (xs.device(), self.sync_spans);
@@ -413,9 +423,17 @@ impl Attention {
                 .apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?
         };
 
-        let (key_states, value_states) = {
-            let _span = device_debug_span!(device, sync, "attn.kv_append")?;
-            self.kv_cache.append(key_states, value_states)?
+        let (key_states, value_states) = match paged {
+            None => {
+                let _span = device_debug_span!(device, sync, "attn.kv_append")?;
+                self.kv_cache.append(key_states, value_states)?
+            }
+            // The write and the gather are one span: together they are
+            // what the paged cache adds to a step.
+            Some(step) => {
+                let _span = device_debug_span!(device, sync, "attn.gather")?;
+                self.kv_cache.append_paged(key_states, value_states, step)?
+            }
         };
 
         let scale = 1f64 / f64::sqrt(self.head_dim as f64);
@@ -504,13 +522,16 @@ impl DecoderLayer {
         xs: &Tensor,
         attention_mask: Option<&Tensor>,
         seqlen_offset: usize,
+        paged: Option<&PagedStep>,
     ) -> Result<Tensor> {
         let (device, sync) = (xs.device(), self.sync_spans);
         let xs = {
             let _span = device_debug_span!(device, sync, "attn")?;
             let residual = xs;
             let xs = self.input_layernorm.forward(xs)?;
-            let xs = self.self_attn.forward(&xs, attention_mask, seqlen_offset)?;
+            let xs = self
+                .self_attn
+                .forward(&xs, attention_mask, seqlen_offset, paged)?;
             (xs + residual)?
         };
         let _span = device_debug_span!(device, sync, "mlp")?;
@@ -538,6 +559,10 @@ pub struct Model {
     dtype: DType,
     attention: AttentionKind,
     sync_spans: bool,
+    /// The block tables, if the KV cache is `Paged`.
+    paged: Option<PagedCache>,
+    num_kv_heads: usize,
+    head_dim: usize,
 }
 
 impl Model {
@@ -565,6 +590,9 @@ impl Model {
             dtype,
             attention: AttentionKind::Naive,
             sync_spans,
+            paged: None,
+            num_kv_heads: cfg.num_key_value_heads,
+            head_dim: cfg.hidden_size / cfg.num_attention_heads,
         })
     }
 
@@ -633,13 +661,30 @@ impl Model {
                 }
             }
         };
+        // One set of slots for all layers, made on the CPU and uploaded
+        // once.
+        let paged = match &mut self.paged {
+            None => None,
+            Some(cache) => {
+                let _span = device_debug_span!(device, sync, "paged.slots")?;
+                let (write, read) = cache.plan(b_size, seqlen_offset, seq_len)?;
+                Some(paged_step(
+                    write,
+                    read,
+                    b_size,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    device,
+                )?)
+            }
+        };
         let mut xs = {
             let _span = device_debug_span!(device, sync, "embed")?;
             self.embed_tokens.forward(input_ids)?
         };
         for (i, layer) in self.layers.iter_mut().enumerate() {
             let _span = device_debug_span!(device, sync, "layer", i)?;
-            xs = layer.forward(&xs, attention_mask.as_ref(), seqlen_offset)?
+            xs = layer.forward(&xs, attention_mask.as_ref(), seqlen_offset, paged.as_ref())?
         }
         let _span = device_debug_span!(device, sync, "norm")?;
         xs.apply(&self.norm)
@@ -647,11 +692,54 @@ impl Model {
 
     /// Empties the KV cache of each layer and sets its kind. For
     /// `KvCacheKind::Prealloc`, `capacity` is the number of positions to
-    /// allocate.
+    /// allocate. For `KvCacheKind::Paged`, the pool holds `capacity`
+    /// positions for one row, in blocks of `DEFAULT_BLOCK_SIZE`. Use
+    /// `reset_paged_kv_cache` for other sizes.
     pub fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
+        if kind == KvCacheKind::Paged {
+            let blocks = capacity.div_ceil(DEFAULT_BLOCK_SIZE);
+            return self.reset_paged_kv_cache(DEFAULT_BLOCK_SIZE, blocks);
+        }
+        self.paged = None;
         for layer in self.layers.iter_mut() {
             layer.reset_kv_cache(kind, capacity)
         }
+    }
+
+    /// Empties the KV cache and makes it a paged cache with a pool of
+    /// `num_blocks` blocks of `block_size` positions, for all rows.
+    pub fn reset_paged_kv_cache(&mut self, block_size: usize, num_blocks: usize) {
+        let cache = PagedCache::new(num_blocks, block_size);
+        for layer in self.layers.iter_mut() {
+            layer.reset_kv_cache(KvCacheKind::Paged, cache.slots())
+        }
+        self.paged = Some(cache);
+    }
+
+    /// Makes `rows` rows from the one row of a paged cache, for example
+    /// after the prefill of one prompt. The rows share the full blocks of
+    /// the prompt. Each new row gets a copy of the last block if it is not
+    /// full.
+    pub fn fork_kv_cache(&mut self, rows: usize) -> Result<()> {
+        let Some(cache) = &mut self.paged else {
+            candle_core::bail!("only the paged KV cache can fork")
+        };
+        let (from, to) = cache.fork(rows)?;
+        if from.is_empty() {
+            return Ok(());
+        }
+        let _span = device_debug_span!(&self.device, self.sync_spans, "paged.fork")?;
+        let from = Tensor::from_vec(from, to.len(), &self.device)?;
+        let to = scatter_ids(to, self.num_kv_heads, self.head_dim, &self.device)?;
+        for layer in self.layers.iter_mut() {
+            layer.self_attn.kv_cache.copy_slots(&from, &to)?;
+        }
+        Ok(())
+    }
+
+    /// The block usage of a paged cache, or `None` for the other kinds.
+    pub fn kv_block_usage(&self) -> Option<BlockUsage> {
+        self.paged.as_ref().map(PagedCache::usage)
     }
 
     /// Sets how each attention layer computes attention.
@@ -752,6 +840,21 @@ impl ModelForCausalLM {
         self.base_model.reset_kv_cache(kind, capacity)
     }
 
+    /// See [`Model::reset_paged_kv_cache`].
+    pub fn reset_paged_kv_cache(&mut self, block_size: usize, num_blocks: usize) {
+        self.base_model.reset_paged_kv_cache(block_size, num_blocks)
+    }
+
+    /// See [`Model::fork_kv_cache`].
+    pub fn fork_kv_cache(&mut self, rows: usize) -> Result<()> {
+        self.base_model.fork_kv_cache(rows)
+    }
+
+    /// See [`Model::kv_block_usage`].
+    pub fn kv_block_usage(&self) -> Option<BlockUsage> {
+        self.base_model.kv_block_usage()
+    }
+
     /// See [`Model::set_attention`].
     pub fn set_attention(&mut self, kind: AttentionKind) {
         self.base_model.set_attention(kind)
@@ -824,6 +927,13 @@ mod tests {
         assert_eq!(dense_rows(&contiguous)?.stride(), contiguous.stride());
         assert_eq!(dense_rows(&narrow)?.stride(), narrow.stride());
         assert_eq!(dense_rows(&transposed)?.stride(), [80, 40, 8, 1]);
+        // A batch of narrow views keeps the batch stride = heads × head
+        // stride. A batch with the heads outside the rows does not.
+        let batch_narrow = Tensor::zeros((3, 2, 9, 8), DType::F32, &device)?.narrow(2, 0, 5)?;
+        assert_eq!(dense_rows(&batch_narrow)?.stride(), batch_narrow.stride());
+        let heads_outside = Tensor::zeros((2, 3, 5, 8), DType::F32, &device)?.transpose(0, 1)?;
+        assert_eq!(heads_outside.stride(), [40, 120, 8, 1]);
+        assert_eq!(dense_rows(&heads_outside)?.stride(), [80, 40, 8, 1]);
         Ok(())
     }
 

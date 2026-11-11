@@ -24,7 +24,18 @@ cargo run --release -p fornace-bench -- \
   `model-q8_0.gguf` and `model-q4_0.gguf` in the model directory. Make them
   with `make quantize`. See the `dtype` column.
 - `--kv-cache <LIST>`: the KV caches, separated by commas: `cat`,
-  `cat-contiguous`, or `prealloc`. The default is `prealloc`.
+  `cat-contiguous`, `prealloc`, or `paged`. The default is `prealloc`.
+- `--block-size <LIST>`: the block sizes of the `paged` cache, separated
+  by commas. The default is `16`. Only `paged` rows use them.
+- `--kv-capacity <N>`: the positions that the cache reserves for each
+  sequence. The default is the prompt and `--max-new-tokens`, which the
+  run knows in advance. `prealloc` reserves this many positions. The
+  `paged` pool holds this many positions for each sequence, in blocks.
+- `--share-prefix <LIST>`: `false`, `true`, or `false,true`. The default
+  is `false`. With `true`, a `paged` row with a batch above 1 prefills
+  the prompt once, and all sequences share its full blocks. Each
+  sequence gets a copy of the last block if it is not full. Other rows
+  use only `false`.
 - `--batch <LIST>`: the batch sizes, separated by commas. A batch of B runs
   B copies of the prompt at the same time. The default is `1`.
 - `--attention <KIND>`: `naive` or `fused`. The default is `naive`. Fused
@@ -51,8 +62,13 @@ cargo run --release -p fornace-bench -- \
 
 On macOS, add `--features metal` to use the GPU.
 
-Each (dtype, KV cache, batch) set runs in its own process, so that each
-set has its own peak memory.
+Each (dtype, KV cache, block size, shared prefix, batch) set runs in its
+own process, so that each set has its own peak memory.
+
+A `paged` worker also prints the blocks of the cache at the end of each
+run to stderr: the blocks in use, the blocks in the pool, the positions
+stored, and the share of the positions in the blocks in use that holds
+nothing. These numbers are not in the CSV file.
 
 ## Metrics for a batch
 
@@ -70,6 +86,11 @@ step makes one token for each sequence.
 
 At batch 1, these are the same as the numbers for one sequence.
 
+With a shared prefix (`shared` in the tag), the prefill computes the
+prompt once, not B times. `prefill_tok_s` keeps its definition, B × T /
+prefill time, so it counts the shared tokens B times. Compare
+`ttft_ms` instead.
+
 ## Runs
 
 Commit one CSV file for each run to `bench/runs/`. Each result gives the
@@ -85,7 +106,7 @@ The columns are in this order. Each row is one recorded generation.
 - `model`: the directory name of `--model`.
 - `device`: the device: `cpu` or `metal`.
 - `dtype`: the data type of the weights that the engine used: `bf16`, `f32`, `q8`, or `q4`. This can differ from `--dtypes`: `f16` gives `bf16` on Metal and `f32` on the CPU. With `q8` and `q4`, the model computes in F32.
-- `kv_cache`: the KV cache: `cat`, `cat-contiguous`, or `prealloc`.
+- `kv_cache`: the KV cache: `cat`, `cat-contiguous`, `prealloc`, or `paged`.
 - `batch`: the number of sequences that run at the same time. See "Metrics for a batch".
 - `prompt_file`: the file name of the prompt.
 - `prompt_tokens`: the number of tokens in the prompt of one sequence.
@@ -98,4 +119,4 @@ The columns are in this order. Each row is one recorded generation.
 - `decode_ms_mean_last64`: the mean time of the last 64 decode steps, in milliseconds. One step makes one token for each sequence. If there are fewer than 64 steps, the mean of all steps.
 - `peak_mem_mb`: the peak memory of the process, in MiB, with one decimal. On macOS this is the physical footprint, which includes Metal buffers. On Linux it is the peak RSS. Each `dtype`, `kv_cache`, and `batch` runs in its own process, so the peak is for that set only. In one set, the peak of a prompt includes the prompts that ran before it.
 - `quality`: the perplexity of the model on the `--quality` text, with 3 decimals, or empty without `--quality`. Perplexity is exp of the mean of −log p(next token) over all tokens after the first, with no repeat penalty. Lower is better.
-- `tag`: the text of `--tag`, then `attention=fused` for fused attention, then `quality=<file name>` for the `--quality` text, separated by `; `. Empty if none applies.
+- `tag`: the text of `--tag`, then `attention=fused` for fused attention, then `block=<N>` for a `paged` row, then `shared` for a shared prefix, then `capacity=<N>` for `--kv-capacity`, then `quality=<file name>` for the `--quality` text, separated by `; `. Empty if none applies.

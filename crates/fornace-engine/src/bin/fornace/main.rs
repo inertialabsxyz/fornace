@@ -8,7 +8,9 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{ArgAction, Parser, ValueEnum};
-use fornace_engine::{AttentionKind, DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig};
+use fornace_engine::{
+    AttentionKind, DEFAULT_BLOCK_SIZE, DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig,
+};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -50,9 +52,22 @@ struct Args {
     /// continues the same prompt.
     #[arg(long, value_name = "N", default_value = "1")]
     batch: NonZeroUsize,
-    /// The KV cache: cat (Candle's original), cat-contiguous, or prealloc.
+    /// The KV cache: cat (Candle's original), cat-contiguous, prealloc, or
+    /// paged (a pool of blocks).
     #[arg(long, default_value = "prealloc")]
     kv_cache: KvCacheKind,
+    /// The positions in a block of the paged cache.
+    #[arg(long, value_name = "N", default_value_t = NonZeroUsize::new(DEFAULT_BLOCK_SIZE).unwrap())]
+    block_size: NonZeroUsize,
+    /// The positions that the cache reserves for each sequence. The default
+    /// is the prompt and --max-new-tokens. For paged, the pool holds this
+    /// many positions for each sequence.
+    #[arg(long, value_name = "N")]
+    kv_capacity: Option<NonZeroUsize>,
+    /// With --kv-cache paged and --batch above 1: prefill the prompt once,
+    /// and let all sequences share its blocks.
+    #[arg(long)]
+    share_prefix: bool,
     /// The attention: naive (matmul and softmax) or fused (Candle's fused
     /// Metal kernel). Fused needs --device metal.
     #[arg(long, default_value = "naive")]
@@ -117,6 +132,9 @@ fn main() -> anyhow::Result<()> {
         max_new_tokens: args.max_new_tokens,
         batch: args.batch.get(),
         kv_cache: args.kv_cache,
+        block_size: args.block_size.get(),
+        kv_capacity: args.kv_capacity.map(NonZeroUsize::get),
+        share_prefix: args.share_prefix,
         attention: args.attention,
         sync_spans: args.trace.is_some() && args.trace_sync,
         ignore_eos: args.ignore_eos,
@@ -164,6 +182,15 @@ fn main() -> anyhow::Result<()> {
             "peak memory:          {:.1} MB",
             report.peak_memory_bytes as f64 / 1e6
         );
+        if let Some(blocks) = report.kv_blocks {
+            println!(
+                "kv blocks:            {} of {} in use, {} positions each, {:.1} % empty",
+                blocks.in_use,
+                blocks.blocks,
+                blocks.block_size,
+                blocks.waste() * 100.0
+            );
+        }
         if args.plot {
             println!();
             plot::decode_times(&report);
@@ -209,6 +236,29 @@ mod tests {
         let args = Args::try_parse_from(BASE.iter().chain(&["--batch", "4"])).unwrap();
         assert_eq!(args.batch.get(), 4);
         assert!(Args::try_parse_from(BASE.iter().chain(&["--batch", "0"])).is_err());
+    }
+
+    #[test]
+    fn paged_cache_flags_parse() {
+        let args = Args::try_parse_from(BASE).unwrap();
+        assert_eq!(args.block_size.get(), DEFAULT_BLOCK_SIZE);
+        assert_eq!(args.kv_capacity, None);
+        assert!(!args.share_prefix);
+        let flags = [
+            "--kv-cache",
+            "paged",
+            "--block-size",
+            "64",
+            "--kv-capacity",
+            "32768",
+            "--share-prefix",
+        ];
+        let args = Args::try_parse_from(BASE.iter().chain(&flags)).unwrap();
+        assert_eq!(args.kv_cache, KvCacheKind::Paged);
+        assert_eq!(args.block_size.get(), 64);
+        assert_eq!(args.kv_capacity.map(NonZeroUsize::get), Some(32768));
+        assert!(args.share_prefix);
+        assert!(Args::try_parse_from(BASE.iter().chain(&["--block-size", "0"])).is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! The peak memory of a process cannot be reset (see `fornace_engine::metrics`).
 //! So the command starts itself again as a worker for each (dtype, KV cache,
-//! batch) set. Each worker loads the engine once and writes its rows to
+//! block size, shared prefix, batch) set. Each worker loads the engine once and writes its rows to
 //! stdout as CSV. The parent appends the rows to the file and prints a summary.
 
 use std::error::Error;
@@ -13,7 +13,9 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser};
-use fornace_engine::{AttentionKind, DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig};
+use fornace_engine::{
+    AttentionKind, DEFAULT_BLOCK_SIZE, DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig,
+};
 use serde::{Deserialize, Serialize};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -41,9 +43,24 @@ struct Args {
     /// on Metal and F32 on the CPU), f32, q8 (Q8_0), or q4 (Q4_0).
     #[arg(long, value_delimiter = ',', default_value = "f16")]
     dtypes: Vec<Dtype>,
-    /// The KV caches, separated by commas: cat, cat-contiguous, or prealloc.
+    /// The KV caches, separated by commas: cat, cat-contiguous, prealloc,
+    /// or paged.
     #[arg(long, value_delimiter = ',', default_value = "prealloc")]
     kv_cache: Vec<KvCacheKind>,
+    /// The block sizes of the paged cache, separated by commas. Only paged
+    /// rows use them. A paged row has `block=<N>` in the tag column.
+    #[arg(long, value_delimiter = ',', default_value = "16")]
+    block_size: Vec<NonZeroUsize>,
+    /// The positions that the cache reserves for each sequence. The default
+    /// is the prompt and --max-new-tokens. A row with this flag has
+    /// `capacity=<N>` in the tag column.
+    #[arg(long, value_name = "N")]
+    kv_capacity: Option<NonZeroUsize>,
+    /// Run the batch with a shared prefix: true, false, or both, separated
+    /// by commas. Only paged rows with a batch above 1 use true. They have
+    /// `shared` in the tag column.
+    #[arg(long, value_delimiter = ',', default_value = "false", action = ArgAction::Set)]
+    share_prefix: Vec<bool>,
     /// The batch sizes, separated by commas. A batch of B runs B copies of
     /// the prompt at the same time.
     #[arg(long, value_delimiter = ',', default_value = "1")]
@@ -151,10 +168,22 @@ fn parent(args: &Args) -> Result<()> {
         }
         for dtype in &args.dtypes {
             for kv_cache in &args.kv_cache {
-                for batch in &args.batch {
-                    let new = run_worker(args, &commit, &date, *dtype, *kv_cache, *batch)?;
-                    append_rows(&out, &new)?;
-                    rows.extend(new);
+                for (block_size, share_prefix) in cache_variants(args, *kv_cache) {
+                    for batch in &args.batch {
+                        if share_prefix && batch.get() == 1 {
+                            continue;
+                        }
+                        let set = Set {
+                            dtype: *dtype,
+                            kv_cache: *kv_cache,
+                            block_size,
+                            share_prefix,
+                            batch: *batch,
+                        };
+                        let new = run_worker(args, &commit, &date, &set)?;
+                        append_rows(&out, &new)?;
+                        rows.extend(new);
+                    }
                 }
             }
         }
@@ -164,15 +193,36 @@ fn parent(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Starts this program again as a worker for one set and reads its rows.
-fn run_worker(
-    args: &Args,
-    commit: &str,
-    date: &str,
+/// The settings of one worker.
+struct Set {
     dtype: Dtype,
     kv_cache: KvCacheKind,
+    block_size: NonZeroUsize,
+    share_prefix: bool,
     batch: NonZeroUsize,
-) -> Result<Vec<Row>> {
+}
+
+/// The (block size, shared prefix) pairs for one KV cache. Only the paged
+/// cache has more than one.
+fn cache_variants(args: &Args, kv_cache: KvCacheKind) -> Vec<(NonZeroUsize, bool)> {
+    if kv_cache != KvCacheKind::Paged {
+        return vec![(NonZeroUsize::new(DEFAULT_BLOCK_SIZE).unwrap(), false)];
+    }
+    args.block_size
+        .iter()
+        .flat_map(|&b| args.share_prefix.iter().map(move |&s| (b, s)))
+        .collect()
+}
+
+/// Starts this program again as a worker for one set and reads its rows.
+fn run_worker(args: &Args, commit: &str, date: &str, set: &Set) -> Result<Vec<Row>> {
+    let Set {
+        dtype,
+        kv_cache,
+        block_size,
+        share_prefix,
+        batch,
+    } = set;
     let prompts = args
         .prompts
         .iter()
@@ -187,6 +237,13 @@ fn run_worker(
         .args(["--dtypes", &dtype.to_string()])
         .args(["--kv-cache", &kv_cache.to_string()])
         .args(["--batch", &batch.to_string()])
+        .args(["--block-size", &block_size.to_string()])
+        .args(["--share-prefix", &share_prefix.to_string()])
+        .args(
+            args.kv_capacity
+                .iter()
+                .flat_map(|c| ["--kv-capacity".to_string(), c.to_string()]),
+        )
         .args(["--attention", &args.attention.to_string()])
         .args(["--device", &args.device.to_string()])
         .args(["--max-new-tokens", &args.max_new_tokens.to_string()])
@@ -205,7 +262,7 @@ fn run_worker(
         .output()?;
     if !output.status.success() {
         return Err(format!(
-            "the worker for {dtype} {kv_cache} batch {batch} failed: {}",
+            "the worker for {dtype} {kv_cache} block {block_size} shared {share_prefix} batch {batch} failed: {}",
             output.status
         )
         .into());
@@ -227,6 +284,9 @@ fn worker(args: &Args) -> Result<()> {
         max_new_tokens: args.max_new_tokens,
         batch: args.batch[0].get(),
         kv_cache: args.kv_cache[0],
+        block_size: args.block_size[0].get(),
+        kv_capacity: args.kv_capacity.map(NonZeroUsize::get),
+        share_prefix: args.share_prefix[0],
         attention: args.attention,
         sync_spans: false,
         ignore_eos: args.ignore_eos,
@@ -272,11 +332,32 @@ fn worker(args: &Args) -> Result<()> {
                 decode_ms_mean_last64: decode_ms_mean_last64(&report.decode_token_ms),
                 peak_mem_mb: peak_mem_mb(report.peak_memory_bytes),
                 quality: String::new(),
-                tag: row_tag(&args.tag, config.attention, quality_file.as_deref()),
+                tag: row_tag(
+                    &args.tag,
+                    config.attention,
+                    &cache_tag(&config),
+                    quality_file.as_deref(),
+                ),
             };
+            let blocks = report.kv_blocks.map_or(String::new(), |b| {
+                format!(
+                    ", kv blocks {} of {} in use ({} positions each, {} stored, {:.2} % empty)",
+                    b.in_use,
+                    b.blocks,
+                    b.block_size,
+                    b.stored_positions,
+                    b.waste() * 100.0
+                )
+            });
             eprintln!(
-                "{} {} batch {} {} run {run}/{}: {:.1} decode tok/s total",
-                row.dtype, row.kv_cache, row.batch, row.prompt_file, args.repeats, row.decode_tok_s
+                "{} {} batch {} {} run {run}/{}: {:.1} decode tok/s total, ttft {:.1} ms{blocks}",
+                row.dtype,
+                row.kv_cache,
+                row.batch,
+                row.prompt_file,
+                args.repeats,
+                row.decode_tok_s,
+                row.ttft_ms
             );
             rows.push(row);
         }
@@ -301,21 +382,36 @@ fn worker(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// The cache settings for the tag column: `block=<N>` and `shared` for the
+/// paged cache, and `capacity=<N>` if --kv-capacity is given.
+fn cache_tag(config: &LoadConfig) -> Vec<String> {
+    let mut tags = Vec::new();
+    if config.kv_cache == KvCacheKind::Paged {
+        tags.push(format!("block={}", config.block_size));
+        if config.share_prefix && config.batch > 1 {
+            tags.push("shared".to_string());
+        }
+    }
+    if let Some(capacity) = config.kv_capacity {
+        tags.push(format!("capacity={capacity}"));
+    }
+    tags
+}
+
 /// The tag column: the --tag text, plus `attention=fused` if the attention
-/// is not the default, plus `quality=<file>` if there is a quality text.
-fn row_tag(tag: &str, attention: AttentionKind, quality: Option<&str>) -> String {
+/// is not the default, plus the cache tags, plus `quality=<file>` if there
+/// is a quality text.
+fn row_tag(tag: &str, attention: AttentionKind, cache: &[String], quality: Option<&str>) -> String {
     let attention =
         (attention != AttentionKind::default()).then(|| format!("attention={attention}"));
     let quality = quality.map(|q| format!("quality={q}"));
-    [
-        Some(tag.to_string()).filter(|t| !t.is_empty()),
-        attention,
-        quality,
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("; ")
+    [Some(tag.to_string()).filter(|t| !t.is_empty()), attention]
+        .into_iter()
+        .flatten()
+        .chain(cache.iter().cloned())
+        .chain(quality)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Appends rows to the CSV file. A new or empty file gets the header first.
@@ -475,11 +571,14 @@ mod tests {
 
     #[test]
     fn row_tag_names_only_the_fused_attention() {
-        assert_eq!(row_tag("", AttentionKind::Naive, None), "");
-        assert_eq!(row_tag("run 2", AttentionKind::Naive, None), "run 2");
-        assert_eq!(row_tag("", AttentionKind::Fused, None), "attention=fused");
+        assert_eq!(row_tag("", AttentionKind::Naive, &[], None), "");
+        assert_eq!(row_tag("run 2", AttentionKind::Naive, &[], None), "run 2");
         assert_eq!(
-            row_tag("run 2", AttentionKind::Fused, None),
+            row_tag("", AttentionKind::Fused, &[], None),
+            "attention=fused"
+        );
+        assert_eq!(
+            row_tag("run 2", AttentionKind::Fused, &[], None),
             "run 2; attention=fused"
         );
     }
@@ -487,12 +586,80 @@ mod tests {
     #[test]
     fn row_tag_names_the_quality_text() {
         assert_eq!(
-            row_tag("", AttentionKind::Naive, Some("alice-2048.txt")),
+            row_tag("", AttentionKind::Naive, &[], Some("alice-2048.txt")),
             "quality=alice-2048.txt"
         );
         assert_eq!(
-            row_tag("case Q", AttentionKind::Fused, Some("alice-2048.txt")),
+            row_tag("case Q", AttentionKind::Fused, &[], Some("alice-2048.txt")),
             "case Q; attention=fused; quality=alice-2048.txt"
+        );
+    }
+
+    #[test]
+    fn row_tag_names_the_cache_settings() {
+        let cache = ["block=16".to_string(), "shared".to_string()];
+        assert_eq!(
+            row_tag("case C", AttentionKind::Fused, &cache, Some("a.txt")),
+            "case C; attention=fused; block=16; shared; quality=a.txt"
+        );
+    }
+
+    fn config(kv_cache: KvCacheKind, batch: usize, share_prefix: bool) -> LoadConfig {
+        LoadConfig {
+            model_dir: PathBuf::from("m"),
+            dtype: Dtype::F16,
+            device: DeviceKind::Cpu,
+            max_new_tokens: 1,
+            batch,
+            kv_cache,
+            block_size: 64,
+            kv_capacity: None,
+            share_prefix,
+            attention: AttentionKind::Fused,
+            sync_spans: false,
+            ignore_eos: true,
+        }
+    }
+
+    #[test]
+    fn cache_tag_names_block_size_sharing_and_capacity() {
+        assert!(cache_tag(&config(KvCacheKind::Prealloc, 4, false)).is_empty());
+        assert_eq!(
+            cache_tag(&config(KvCacheKind::Paged, 1, true)),
+            ["block=64"]
+        );
+        assert_eq!(
+            cache_tag(&config(KvCacheKind::Paged, 4, true)),
+            ["block=64", "shared"]
+        );
+        let mut reserved = config(KvCacheKind::Prealloc, 1, false);
+        reserved.kv_capacity = Some(32768);
+        assert_eq!(cache_tag(&reserved), ["capacity=32768"]);
+    }
+
+    #[test]
+    fn the_default_block_size_is_the_engine_default() {
+        let args = Args::try_parse_from(["fornace-bench", "--model", "m"]).unwrap();
+        let sizes: Vec<usize> = args.block_size.iter().map(|b| b.get()).collect();
+        assert_eq!(sizes, [DEFAULT_BLOCK_SIZE]);
+        assert_eq!(args.share_prefix, [false]);
+    }
+
+    #[test]
+    fn only_the_paged_cache_gets_block_sizes_and_sharing() {
+        let base = ["fornace-bench", "--model", "m"];
+        let flags = ["--block-size", "8,16", "--share-prefix", "false,true"];
+        let args = Args::try_parse_from(base.iter().chain(&flags)).unwrap();
+        let sizes = |kind| -> Vec<(usize, bool)> {
+            cache_variants(&args, kind)
+                .into_iter()
+                .map(|(b, s)| (b.get(), s))
+                .collect()
+        };
+        assert_eq!(sizes(KvCacheKind::Prealloc), [(16, false)]);
+        assert_eq!(
+            sizes(KvCacheKind::Paged),
+            [(8, false), (8, true), (16, false), (16, true)]
         );
     }
 

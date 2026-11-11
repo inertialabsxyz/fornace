@@ -28,7 +28,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::quantized_var_builder::VarBuilder as QVarBuilder;
 use tokenizers::Tokenizer;
 
-pub use crate::cache::KvCacheKind;
+pub use crate::cache::{BlockUsage, DEFAULT_BLOCK_SIZE, KvCacheKind};
 use crate::metrics::peak_memory_bytes;
 pub use crate::model::AttentionKind;
 use crate::model::{Config, ModelForCausalLM};
@@ -76,6 +76,12 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("--share-prefix needs --kv-cache paged, not {0}")]
+    SharePrefixNeedsPaged(KvCacheKind),
+    #[error("--share-prefix needs the same prompt in every row")]
+    SharePrefixNeedsOnePrompt,
+    #[error("the block size must be at least 1")]
+    ZeroBlockSize,
     #[error("perplexity needs at least 2 tokens, the text has {0}")]
     TextTooShort(usize),
     #[error("candle")]
@@ -175,6 +181,16 @@ pub struct LoadConfig {
     pub batch: usize,
     /// How each attention layer stores earlier keys and values.
     pub kv_cache: KvCacheKind,
+    /// The positions in a block of the `Paged` cache.
+    pub block_size: usize,
+    /// The positions that the cache reserves for each row. `None` reserves
+    /// the prompt and `max_new_tokens`, which a run knows in advance. A chat
+    /// or a server does not know the length, and must reserve more. For
+    /// `Paged`, the pool holds this many positions for each row, in blocks.
+    pub kv_capacity: Option<usize>,
+    /// With `Paged` and B copies of one prompt: prefill the prompt once, and
+    /// let the B rows share its blocks.
+    pub share_prefix: bool,
     /// How each attention layer computes attention.
     pub attention: AttentionKind,
     /// Wait for the device at the start and end of each span, so that spans
@@ -211,6 +227,9 @@ pub struct GenerationReport {
     pub texts: Vec<String>,
     /// The time of each batched decode step.
     pub decode_token_ms: Vec<f64>,
+    /// The blocks of the paged cache at the end of the run, or `None` for
+    /// the other caches.
+    pub kv_blocks: Option<BlockUsage>,
 }
 
 /// A loaded model that generates text.
@@ -231,6 +250,9 @@ impl Engine {
         let start = Instant::now();
         let _load = tracing::info_span!("load").entered();
         let sync = load_config.sync_spans;
+        if load_config.block_size == 0 {
+            return Err(Error::ZeroBlockSize);
+        }
         // Candle's fused attention has no CPU kernel.
         if load_config.attention == AttentionKind::Fused && load_config.device == DeviceKind::Cpu {
             return Err(Error::FusedAttentionNeedsMetal);
@@ -343,8 +365,7 @@ impl Engine {
         if ids.len() < 2 {
             return Err(Error::TextTooShort(ids.len()));
         }
-        self.model
-            .reset_kv_cache(self.load_config.kv_cache, ids.len());
+        self.reset_kv_cache(1, ids.len(), ids.len(), false);
         let input = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
         let hidden = self.model.hidden_states(&input, 0)?.squeeze(0)?;
         let targets = Tensor::new(&ids[1..], &self.device)?;
@@ -399,11 +420,21 @@ impl Engine {
                 rows.iter().map(Vec::len).collect(),
             ));
         }
+        if self.load_config.share_prefix {
+            if self.load_config.kv_cache != KvCacheKind::Paged {
+                return Err(Error::SharePrefixNeedsPaged(self.load_config.kv_cache));
+            }
+            if rows.iter().any(|ids| ids != &rows[0]) {
+                return Err(Error::SharePrefixNeedsOnePrompt);
+            }
+        }
+        let shared = self.load_config.share_prefix && batch > 1;
+        let capacity = self
+            .load_config
+            .kv_capacity
+            .unwrap_or(prompt_tokens + self.load_config.max_new_tokens);
         // The cache tensors take the batch dimension from the first append.
-        self.model.reset_kv_cache(
-            self.load_config.kv_cache,
-            prompt_tokens + self.load_config.max_new_tokens,
-        );
+        self.reset_kv_cache(batch, prompt_tokens, capacity, shared);
         // End of sequence, ChatML
         let eos = [
             self.tokenizer.token_to_id("<|im_end|>"),
@@ -422,12 +453,23 @@ impl Engine {
         )?;
         let logits = {
             let _span = device_span!(&self.device, sync, "forward")?;
-            let input = Tensor::from_vec(rows.concat(), (batch, prompt_tokens), &self.device)?;
+            // A shared prefix runs the prompt once, as one row. The fork
+            // then makes the other rows, which share its blocks.
+            let input = if shared {
+                Tensor::new(rows[0].as_slice(), &self.device)?.unsqueeze(0)?
+            } else {
+                Tensor::from_vec(rows.concat(), (batch, prompt_tokens), &self.device)?
+            };
             // [B, 1, vocab] to [B, vocab]
-            self.model
+            let logits = self
+                .model
                 .forward(&input, 0)?
                 .squeeze(1)?
-                .to_dtype(DType::F32)?
+                .to_dtype(DType::F32)?;
+            if shared {
+                self.model.fork_kv_cache(batch)?;
+            }
+            logits
         };
 
         let mut next = {
@@ -435,7 +477,7 @@ impl Engine {
             samplers
                 .iter_mut()
                 .enumerate()
-                .map(|(b, sampler)| sampler.sample(&logits.get(b)?))
+                .map(|(b, sampler)| sampler.sample(&logits.get(if shared { 0 } else { b })?))
                 .collect::<candle_core::Result<Vec<u32>>>()?
         };
         drop(prefill);
@@ -520,7 +562,30 @@ impl Engine {
             peak_memory_bytes: peak_memory_bytes(),
             texts,
             decode_token_ms,
+            kv_blocks: self.model.kv_block_usage(),
         })
+    }
+
+    /// Empties the KV cache before a run of `rows` rows of `prompt_tokens`
+    /// tokens. Each row gets room for `capacity` positions. For `Paged`,
+    /// the pool has the blocks that the run can need. With `shared`, the
+    /// rows share the full blocks of the prompt, so the pool needs them
+    /// only once.
+    fn reset_kv_cache(&mut self, rows: usize, prompt_tokens: usize, capacity: usize, shared: bool) {
+        match self.load_config.kv_cache {
+            KvCacheKind::Paged => {
+                let block_size = self.load_config.block_size;
+                let per_row = capacity.div_ceil(block_size);
+                let blocks = if shared {
+                    let full_prompt = prompt_tokens / block_size;
+                    per_row + (rows - 1) * per_row.saturating_sub(full_prompt)
+                } else {
+                    rows * per_row
+                };
+                self.model.reset_paged_kv_cache(block_size, blocks)
+            }
+            kind => self.model.reset_kv_cache(kind, capacity),
+        }
     }
 }
 
@@ -558,6 +623,9 @@ mod tests {
             max_new_tokens: 1,
             batch: 1,
             kv_cache: KvCacheKind::default(),
+            block_size: DEFAULT_BLOCK_SIZE,
+            kv_capacity: None,
+            share_prefix: false,
             attention: AttentionKind::Fused,
             sync_spans: false,
             ignore_eos: false,
