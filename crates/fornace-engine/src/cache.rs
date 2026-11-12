@@ -477,6 +477,16 @@ impl LayerCache {
         Ok((gather(k_pool)?, gather(v_pool)?))
     }
 
+    /// Keeps only the first `len` positions. Only `Prealloc` supports it.
+    /// The buffer is not changed, and the next append writes over the
+    /// removed positions.
+    pub(crate) fn truncate(&mut self, len: usize) -> Result<()> {
+        match self {
+            LayerCache::Prealloc(cache) => cache.truncate(len),
+            _ => candle_core::bail!("truncate needs a prealloc KV cache"),
+        }
+    }
+
     /// Makes `rows` rows from the one row of a `Prealloc` cache: one copy
     /// of its positions into a new cache of `rows` rows, with the same
     /// capacity. This is the shared prefill without blocks.
@@ -720,6 +730,38 @@ mod tests {
             panic!("the cat-contiguous cache is empty");
         };
         assert!(k.is_contiguous());
+        Ok(())
+    }
+
+    #[test]
+    fn a_truncated_prealloc_cache_equals_one_without_the_removed_positions() -> Result<()> {
+        let dev = Device::Cpu;
+        let positions = |from: usize, n: usize| -> Result<Tensor> {
+            let values: Vec<f32> = (0..2 * n * 4).map(|i| (from * 8 + i) as f32).collect();
+            Tensor::from_vec(values, (1, 2, n, 4), &dev)
+        };
+        let (ten, three) = (positions(0, 10)?, positions(100, 3)?);
+        let mut cache = LayerCache::new(KvCacheKind::Prealloc, 16);
+        cache.append(ten.clone(), ten.clone())?;
+        cache.truncate(6)?;
+        let (k, v) = cache.append(three.clone(), three.clone())?;
+
+        let mut reference = LayerCache::new(KvCacheKind::Prealloc, 16);
+        let six = ten.narrow(SEQ_DIM, 0, 6)?;
+        reference.append(six.clone(), six)?;
+        let (k_ref, v_ref) = reference.append(three.clone(), three)?;
+
+        assert_eq!(k.dims(), [1, 2, 9, 4]);
+        assert_eq!(
+            k.flatten_all()?.to_vec1::<f32>()?,
+            k_ref.flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            v.flatten_all()?.to_vec1::<f32>()?,
+            v_ref.flatten_all()?.to_vec1::<f32>()?
+        );
+        assert!(cache.truncate(10).is_err());
+        assert!(LayerCache::new(KvCacheKind::Paged, 16).truncate(0).is_err());
         Ok(())
     }
 }

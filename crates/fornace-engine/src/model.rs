@@ -748,6 +748,15 @@ impl Model {
         self.paged.as_ref().map(PagedCache::usage)
     }
 
+    /// Keeps only the first `len` positions in the KV cache of each layer.
+    /// Only the `Prealloc` cache supports it.
+    pub fn truncate_kv_cache(&mut self, len: usize) -> Result<()> {
+        for layer in self.layers.iter_mut() {
+            layer.self_attn.kv_cache.truncate(len)?;
+        }
+        Ok(())
+    }
+
     /// Sets how each attention layer computes attention.
     pub fn set_attention(&mut self, kind: AttentionKind) {
         self.attention = kind;
@@ -859,6 +868,11 @@ impl ModelForCausalLM {
     /// See [`Model::kv_block_usage`].
     pub fn kv_block_usage(&self) -> Option<BlockUsage> {
         self.base_model.kv_block_usage()
+    }
+
+    /// See [`Model::truncate_kv_cache`].
+    pub fn truncate_kv_cache(&mut self, len: usize) -> Result<()> {
+        self.base_model.truncate_kv_cache(len)
     }
 
     /// See [`Model::set_attention`].
