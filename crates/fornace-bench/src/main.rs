@@ -2,7 +2,7 @@
 //!
 //! The peak memory of a process cannot be reset (see `fornace_engine::metrics`).
 //! So the command starts itself again as a worker for each (dtype, KV cache,
-//! block size, shared prefix, batch) set. Each worker loads the engine once and writes its rows to
+//! block size, shared prefix, batch, draft dtype, K) set. Each worker loads the engine once and writes its rows to
 //! stdout as CSV. The parent appends the rows to the file and prints a summary.
 
 use std::error::Error;
@@ -14,7 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser};
 use fornace_engine::{
-    AttentionKind, DEFAULT_BLOCK_SIZE, DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig,
+    AttentionKind, DEFAULT_BLOCK_SIZE, DeviceKind, DraftConfig, Dtype, Engine, KvCacheKind,
+    LoadConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +98,20 @@ struct Args {
     /// exactly --max-new-tokens tokens.
     #[arg(long, value_name = "BOOL", default_value_t = true, action = ArgAction::Set)]
     ignore_eos: bool,
+    /// A draft model for speculative decoding: a model directory with the
+    /// tokenizer of --model. Each K of --spec-k above 0 runs once with each
+    /// draft dtype. It needs --batch 1 and --kv-cache prealloc.
+    #[arg(long, value_name = "DIR")]
+    draft_model: Option<PathBuf>,
+    /// The data types of the draft weights, separated by commas, as for
+    /// --dtypes.
+    #[arg(long, value_delimiter = ',', default_value = "f16")]
+    draft_dtypes: Vec<Dtype>,
+    /// The guesses of the draft in each round, separated by commas. 0 runs
+    /// the model without a draft, so that list "0,4" puts the target alone
+    /// and the speculative rows in one command. Above 0 needs --draft-model.
+    #[arg(long, value_delimiter = ',', default_value = "0")]
+    spec_k: Vec<usize>,
     /// The engines to measure, separated by commas.
     #[arg(
         long,
@@ -151,6 +166,17 @@ struct Row {
     peak_mem_mb: f64,
     quality: String,
     tag: String,
+    /// The draft model and the format of its weights, for example
+    /// `qwen2.5-0.5b-instruct:q8`. Empty without a draft.
+    draft: String,
+    spec_k: Option<usize>,
+    rounds: Option<usize>,
+    accepted: Option<usize>,
+    tested: Option<usize>,
+    /// accepted / tested, with 3 decimals.
+    alpha: Option<f64>,
+    draft_ms: Option<f64>,
+    verify_ms: Option<f64>,
 }
 
 fn main() -> Result<()> {
@@ -165,6 +191,9 @@ fn main() -> Result<()> {
 /// Starts one worker for each (dtype, KV cache, batch) set, appends the
 /// rows to the CSV file, and prints a summary table.
 fn parent(args: &Args) -> Result<()> {
+    if args.draft_model.is_none() && args.spec_k.iter().any(|&k| k > 0) {
+        return Err("--spec-k above 0 needs --draft-model".into());
+    }
     let commit = git_commit();
     let date = today();
     let out = args
@@ -184,16 +213,20 @@ fn parent(args: &Args) -> Result<()> {
                         if share_prefix && batch.get() == 1 {
                             continue;
                         }
-                        let set = Set {
-                            dtype: *dtype,
-                            kv_cache: *kv_cache,
-                            block_size,
-                            share_prefix,
-                            batch: *batch,
-                        };
-                        let new = run_worker(args, &commit, &date, &set)?;
-                        append_rows(&out, &new)?;
-                        rows.extend(new);
+                        for (draft_dtype, spec_k) in spec_variants(args) {
+                            let set = Set {
+                                dtype: *dtype,
+                                kv_cache: *kv_cache,
+                                block_size,
+                                share_prefix,
+                                batch: *batch,
+                                draft_dtype,
+                                spec_k,
+                            };
+                            let new = run_worker(args, &commit, &date, &set)?;
+                            append_rows(&out, &new)?;
+                            rows.extend(new);
+                        }
                     }
                 }
             }
@@ -211,6 +244,24 @@ struct Set {
     block_size: NonZeroUsize,
     share_prefix: bool,
     batch: NonZeroUsize,
+    /// The draft dtype, or `None` without a draft (K = 0).
+    draft_dtype: Option<Dtype>,
+    spec_k: usize,
+}
+
+/// The (draft dtype, K) pairs: `(None, 0)` once if --spec-k has 0, then
+/// each draft dtype with each K above 0.
+fn spec_variants(args: &Args) -> Vec<(Option<Dtype>, usize)> {
+    let mut variants = Vec::new();
+    if args.spec_k.contains(&0) {
+        variants.push((None, 0));
+    }
+    for &dtype in &args.draft_dtypes {
+        for &k in args.spec_k.iter().filter(|&&k| k > 0) {
+            variants.push((Some(dtype), k));
+        }
+    }
+    variants
 }
 
 /// The (block size, shared prefix) pairs for one KV cache. Only the paged
@@ -254,6 +305,8 @@ fn run_worker(args: &Args, commit: &str, date: &str, set: &Set) -> Result<Vec<Ro
         block_size,
         share_prefix,
         batch,
+        draft_dtype,
+        spec_k,
     } = set;
     let prompts = args
         .prompts
@@ -294,13 +347,25 @@ fn run_worker(args: &Args, commit: &str, date: &str, set: &Set) -> Result<Vec<Ro
                 .iter()
                 .flat_map(|q| [std::ffi::OsStr::new("--quality"), q.as_os_str()]),
         )
+        .args(["--spec-k", &spec_k.to_string()])
+        .args(
+            draft_dtype
+                .iter()
+                .map(|d| ["--draft-dtypes".to_string(), d.to_string()])
+                .chain(
+                    args.draft_model
+                        .iter()
+                        .map(|m| ["--draft-model".to_string(), m.display().to_string()]),
+                )
+                .flatten(),
+        )
         .args(["--commit", commit])
         .args(["--date", date])
         .stderr(Stdio::inherit())
         .output()?;
     if !output.status.success() {
         return Err(format!(
-            "the worker for {dtype} {kv_cache} block {block_size} shared {share_prefix} batch {batch} failed: {}",
+            "the worker for {dtype} {kv_cache} block {block_size} shared {share_prefix} batch {batch} draft {draft_dtype:?} K {spec_k} failed: {}",
             output.status
         )
         .into());
@@ -328,7 +393,14 @@ fn worker(args: &Args) -> Result<()> {
         attention: args.attention,
         sync_spans: false,
         ignore_eos: args.ignore_eos,
-        draft: None,
+        draft: match (&args.draft_model, args.spec_k[0]) {
+            (Some(dir), k) if k > 0 => Some(DraftConfig {
+                model_dir: dir.clone(),
+                dtype: args.draft_dtypes[0],
+                k,
+            }),
+            _ => None,
+        },
     };
     let mut engine = Engine::load(&config)?;
     let dtype = engine.effective_dtype();
@@ -339,6 +411,10 @@ fn worker(args: &Args) -> Result<()> {
         );
     }
     let model = file_name(&args.model);
+    let draft = match (&config.draft, engine.draft_effective_dtype()) {
+        (Some(d), Some(dtype)) => format!("{}:{dtype}", file_name(&d.model_dir)),
+        _ => String::new(),
+    };
     let quality_file = args.quality.as_deref().map(file_name);
     let mut rows = Vec::new();
     for prompt_path in &args.prompts {
@@ -386,6 +462,17 @@ fn worker(args: &Args) -> Result<()> {
                     &[cache_tag(&config), suffix_tag(args)].concat(),
                     quality_file.as_deref(),
                 ),
+                draft: draft.clone(),
+                spec_k: report.speculative.as_ref().map(|s| s.k),
+                rounds: report.speculative.as_ref().map(|s| s.rounds),
+                accepted: report.speculative.as_ref().map(|s| s.accepted),
+                tested: report.speculative.as_ref().map(|s| s.tested),
+                alpha: report
+                    .speculative
+                    .as_ref()
+                    .map(|s| (s.alpha() * 1000.0).round() / 1000.0),
+                draft_ms: report.speculative.as_ref().map(|s| s.draft_ms),
+                verify_ms: report.speculative.as_ref().map(|s| s.verify_ms),
             };
             let blocks = report.kv_blocks.map_or(String::new(), |b| {
                 format!(
@@ -401,6 +488,10 @@ fn worker(args: &Args) -> Result<()> {
                 "{blocks}, shared prefix {} tokens",
                 report.shared_prefix_tokens
             );
+            let blocks = match (&row.spec_k, &row.alpha) {
+                (Some(k), Some(alpha)) => format!("{blocks}, draft {draft} K {k} alpha {alpha:.3}"),
+                _ => blocks,
+            };
             eprintln!(
                 "{} {} batch {} {} run {run}/{}: {:.1} decode tok/s total, ttft {:.1} ms{blocks}",
                 row.dtype,
@@ -502,8 +593,9 @@ fn peak_mem_mb(bytes: u64) -> f64 {
     (bytes as f64 / 1_048_576.0 * 10.0).round() / 10.0
 }
 
-/// A Markdown table with one line for each (prompt, dtype, KV cache, batch):
-/// the mean total decode tok/s and the mean peak memory over the repeats.
+/// A Markdown table with one line for each (prompt, dtype, KV cache, batch,
+/// draft, K): the mean total decode tok/s, the mean α, and the mean peak
+/// memory over the repeats.
 fn summary(rows: &[Row]) -> String {
     let mut groups: Vec<(&Row, Vec<&Row>)> = Vec::new();
     for row in rows {
@@ -513,6 +605,8 @@ fn summary(rows: &[Row]) -> String {
                 r.dtype.clone(),
                 r.kv_cache.clone(),
                 r.batch,
+                r.draft.clone(),
+                r.spec_k,
             )
         };
         match groups.iter_mut().find(|(first, _)| key(first) == key(row)) {
@@ -521,17 +615,24 @@ fn summary(rows: &[Row]) -> String {
         }
     }
     let mut out = String::from(
-        "| prompt | dtype | kv_cache | batch | decode tok/s | peak MB |\n|---|---|---|---:|---:|---:|\n",
+        "| prompt | dtype | kv_cache | batch | draft | K | decode tok/s | alpha | peak MB |\n\
+         |---|---|---|---:|---|---:|---:|---:|---:|\n",
     );
     for (first, group) in groups {
         let mean =
             |f: fn(&Row) -> f64| group.iter().map(|r| f(r)).sum::<f64>() / group.len() as f64;
+        let alpha = first
+            .alpha
+            .map(|_| format!("{:.3}", mean(|r| r.alpha.unwrap_or(0.0))))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {:.1} | {:.1} |\n",
+            "| {} | {} | {} | {} | {} | {} | {:.1} | {alpha} | {:.1} |\n",
             first.prompt_file,
             first.dtype,
             first.kv_cache,
             first.batch,
+            first.draft,
+            first.spec_k.map(|k| k.to_string()).unwrap_or_default(),
             mean(|r| r.decode_tok_s),
             mean(|r| r.peak_mem_mb),
         ));
@@ -616,6 +717,14 @@ mod tests {
             peak_mem_mb: 1234.5,
             quality: String::new(),
             tag: "after-4077".to_string(),
+            draft: String::new(),
+            spec_k: None,
+            rounds: None,
+            accepted: None,
+            tested: None,
+            alpha: None,
+            draft_ms: None,
+            verify_ms: None,
         }
     }
 
@@ -758,10 +867,11 @@ mod tests {
             text,
             "commit,date,engine,model,device,dtype,kv_cache,batch,prompt_file,\
              prompt_tokens,generated_tokens,run,load_ms,prefill_tok_s,decode_tok_s,\
-             ttft_ms,decode_ms_mean_last64,peak_mem_mb,quality,tag\n\
+             ttft_ms,decode_ms_mean_last64,peak_mem_mb,quality,tag,draft,spec_k,\
+             rounds,accepted,tested,alpha,draft_ms,verify_ms\n\
              abc1234-dirty,2026-11-02,fornace,qwen2.5-0.5b-instruct,metal,bf16,\
              prealloc,1,alice-512.txt,512,128,2,250.5,4000.0,115.25,128.0,8.5,\
-             1234.5,,after-4077\n"
+             1234.5,,after-4077,,,,,,,,\n"
         );
     }
 
@@ -772,14 +882,24 @@ mod tests {
             .from_writer(Vec::new());
         let mut empty = row();
         empty.decode_ms_mean_last64 = None;
+        let mut spec = row();
+        spec.draft = "qwen2.5-0.5b-instruct:q8".to_string();
+        spec.spec_k = Some(4);
+        spec.rounds = Some(70);
+        spec.accepted = Some(56);
+        spec.tested = Some(127);
+        spec.alpha = Some(0.441);
+        spec.draft_ms = Some(1361.5);
+        spec.verify_ms = Some(2699.25);
         writer.serialize(row()).unwrap();
         writer.serialize(&empty).unwrap();
+        writer.serialize(&spec).unwrap();
         let bytes = writer.into_inner().unwrap();
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(false)
             .from_reader(bytes.as_slice());
         let rows: Vec<Row> = reader.deserialize().map(|r| r.unwrap()).collect();
-        assert_eq!(rows, vec![row(), empty]);
+        assert_eq!(rows, vec![row(), empty, spec]);
     }
 
     #[test]
@@ -809,6 +929,35 @@ mod tests {
     }
 
     #[test]
+    fn spec_variants_run_the_target_alone_once_and_each_draft_with_each_k() {
+        let base = ["fornace-bench", "--model", "m"];
+        let args = Args::try_parse_from(base).unwrap();
+        assert_eq!(spec_variants(&args), [(None, 0)]);
+        let flags = [
+            "--draft-model",
+            "d",
+            "--draft-dtypes",
+            "f16,q8",
+            "--spec-k",
+            "0,2,4",
+        ];
+        let args = Args::try_parse_from(base.iter().chain(&flags)).unwrap();
+        assert_eq!(
+            spec_variants(&args),
+            [
+                (None, 0),
+                (Some(Dtype::F16), 2),
+                (Some(Dtype::F16), 4),
+                (Some(Dtype::Q8), 2),
+                (Some(Dtype::Q8), 4),
+            ]
+        );
+        let flags = ["--draft-model", "d", "--spec-k", "4"];
+        let args = Args::try_parse_from(base.iter().chain(&flags)).unwrap();
+        assert_eq!(spec_variants(&args), [(Some(Dtype::F16), 4)]);
+    }
+
+    #[test]
     fn summary_has_one_line_per_group_with_means() {
         let mut second = row();
         second.decode_tok_s = 125.0;
@@ -819,14 +968,22 @@ mod tests {
         let mut batched = row();
         batched.batch = 4;
         batched.decode_tok_s = 400.0;
-        let table = summary(&[row(), second, other, batched]);
+        let mut spec = row();
+        spec.draft = "d:q8".to_string();
+        spec.spec_k = Some(4);
+        spec.alpha = Some(0.4);
+        spec.decode_tok_s = 30.0;
+        let mut spec2 = spec.clone();
+        spec2.alpha = Some(0.5);
+        let table = summary(&[row(), second, other, batched, spec, spec2]);
         assert_eq!(
             table,
-            "| prompt | dtype | kv_cache | batch | decode tok/s | peak MB |\n\
-             |---|---|---|---:|---:|---:|\n\
-             | alice-512.txt | bf16 | prealloc | 1 | 120.1 | 1235.5 |\n\
-             | alice-512.txt | bf16 | cat | 1 | 58.0 | 1234.5 |\n\
-             | alice-512.txt | bf16 | prealloc | 4 | 400.0 | 1234.5 |\n"
+            "| prompt | dtype | kv_cache | batch | draft | K | decode tok/s | alpha | peak MB |\n\
+             |---|---|---|---:|---|---:|---:|---:|---:|\n\
+             | alice-512.txt | bf16 | prealloc | 1 |  |  | 120.1 |  | 1235.5 |\n\
+             | alice-512.txt | bf16 | cat | 1 |  |  | 58.0 |  | 1234.5 |\n\
+             | alice-512.txt | bf16 | prealloc | 4 |  |  | 400.0 |  | 1234.5 |\n\
+             | alice-512.txt | bf16 | prealloc | 1 | d:q8 | 4 | 30.0 | 0.450 | 1234.5 |\n"
         );
     }
 }

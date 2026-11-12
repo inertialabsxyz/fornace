@@ -65,6 +65,16 @@ cargo run --release -p fornace-bench -- \
 - `--ignore-eos <BOOL>`: do not stop at the end-of-sequence token. The
   default is `true`, so each run generates exactly `--max-new-tokens`
   tokens.
+- `--draft-model <DIR>`: a draft model for speculative decoding. It must
+  have the tokenizer of `--model`. It needs `--batch 1` and `--kv-cache
+  prealloc`.
+- `--draft-dtypes <LIST>`: the data types of the draft weights, separated
+  by commas, as for `--dtypes`. The default is `f16`.
+- `--spec-k <LIST>`: the guesses of the draft in each round, separated by
+  commas. The default is `0`. A K of `0` runs `--model` without a draft,
+  so `--spec-k 0,2,4` puts the target alone and the speculative rows in one
+  command. Each K above 0 runs once with each draft dtype. A K above 0
+  needs `--draft-model`. See "Metrics for speculative decoding".
 - `--engines <LIST>`: the engines to measure, separated by commas. The
   default is `fornace`.
 - `--out <CSV>`: the CSV file for the results. If it exists, the rows are
@@ -76,8 +86,8 @@ cargo run --release -p fornace-bench -- \
 
 On macOS, add `--features metal` to use the GPU.
 
-Each (dtype, KV cache, block size, shared prefix, batch) set runs in its
-own process, so that each set has its own peak memory.
+Each (dtype, KV cache, block size, shared prefix, batch, draft dtype, K)
+set runs in its own process, so that each set has its own peak memory.
 
 A `paged` worker also prints the blocks of the cache at the end of each
 run to stderr: the blocks in use, the blocks in the pool, the positions
@@ -104,6 +114,21 @@ With a shared prefix (`shared` in the tag), the prefill computes the
 shared tokens once, not B times. `prefill_tok_s` keeps its definition, B × T /
 prefill time, so it counts the shared tokens B times. Compare
 `ttft_ms` instead.
+
+## Metrics for speculative decoding
+
+A row with a draft has one sequence (batch 1). In each round, the draft
+guesses K tokens, one step each, and `--model` (the target) checks them in
+one forward pass of K + 1 tokens. Greedy sampling only.
+
+- `ttft_ms` includes the prefill of the draft, because the first round
+  needs the draft cache. So does `prefill_tok_s`.
+- `decode_tok_s` keeps its definition: (N − 1) / decode time.
+- `decode_ms_mean_last64` is a mean over tokens, not over rounds. Each
+  token of a round gets the round time divided by the tokens of the round.
+- `alpha` is `accepted` / `tested`. After the first reject in a round, the
+  later guesses are not checked, so they are not in `tested`. Do not use
+  `accepted` / (`rounds` × K).
 
 ## Runs
 
@@ -134,3 +159,13 @@ The columns are in this order. Each row is one recorded generation.
 - `peak_mem_mb`: the peak memory of the process, in MiB, with one decimal. On macOS this is the physical footprint, which includes Metal buffers. On Linux it is the peak RSS. Each `dtype`, `kv_cache`, and `batch` runs in its own process, so the peak is for that set only. In one set, the peak of a prompt includes the prompts that ran before it.
 - `quality`: the perplexity of the model on the `--quality` text, with 3 decimals, or empty without `--quality`. Perplexity is exp of the mean of −log p(next token) over all tokens after the first, with no repeat penalty. Lower is better.
 - `tag`: the text of `--tag`, then `attention=fused` for fused attention, then `block=<N>` for a `paged` row, then `shared` for a shared prefix (`paged` or `prealloc`), then `capacity=<N>` for `--kv-capacity`, then `suffix=<file>:<N>` for `--suffix`, then `quality=<file name>` for the `--quality` text, separated by `; `. Empty if none applies.
+- `draft`: the directory name of the draft model and the format of its weights, for example `qwen2.5-0.5b-instruct:q8`. Empty without a draft. The columns after it are empty without a draft too.
+- `spec_k`: K, the guesses of the draft in each round.
+- `rounds`: the speculative rounds in the run.
+- `accepted`: the guesses that the target accepted, in all rounds.
+- `tested`: the guesses that the target checked, in all rounds: j + 1 in a round with a reject after j accepts, and K in a round with no reject.
+- `alpha`: `accepted` / `tested`, with 3 decimals.
+- `draft_ms`: the total time of the draft steps, in milliseconds, untraced. It includes the extra draft step after a round with no reject.
+- `verify_ms`: the total time of the verify passes, in milliseconds, untraced. It includes the logits to the CPU and the choice of the target's token at each position.
+
+The last eight columns are new on 2026-11-12. Older CSV files do not have them. Do not append new rows to an older file.
