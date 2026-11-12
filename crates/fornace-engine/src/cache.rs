@@ -477,6 +477,29 @@ impl LayerCache {
         Ok((gather(k_pool)?, gather(v_pool)?))
     }
 
+    /// Makes `rows` rows from the one row of a `Prealloc` cache: one copy
+    /// of its positions into a new cache of `rows` rows, with the same
+    /// capacity. This is the shared prefill without blocks.
+    pub(crate) fn fork_prealloc(&mut self, rows: usize) -> Result<()> {
+        let LayerCache::Prealloc(cache) = self else {
+            candle_core::bail!("fork_prealloc needs a prealloc KV cache")
+        };
+        let (Some(k), Some(v)) = (cache.k()?, cache.v()?) else {
+            candle_core::bail!("a fork needs a KV cache that holds positions")
+        };
+        if k.dim(0)? != 1 {
+            candle_core::bail!("a fork needs a KV cache with one row, not {}", k.dim(0)?)
+        }
+        let capacity = cache.k_cache().max_seq_len();
+        let mut forked = candle_nn::kv_cache::KvCache::new(SEQ_DIM, capacity);
+        forked.append(
+            &k.repeat((rows, 1, 1, 1))?.contiguous()?,
+            &v.repeat((rows, 1, 1, 1))?.contiguous()?,
+        )?;
+        *cache = forked;
+        Ok(())
+    }
+
     /// Copies the positions at the slots `from` to the slots `to` in the
     /// pool. `from` is `[n]`, and `to` is the ids of `scatter_ids`.
     pub(crate) fn copy_slots(&mut self, from: &Tensor, to: &Tensor) -> Result<()> {
@@ -601,6 +624,32 @@ mod tests {
         let (from, _) = cache.fork(4).unwrap();
         assert!(from.is_empty());
         assert_eq!(cache.usage().in_use, 2);
+    }
+
+    /// A forked `prealloc` cache of one row gives the tensors of a cache
+    /// that got the same prefix in every row.
+    #[test]
+    fn a_prealloc_fork_equals_repeated_rows() -> Result<()> {
+        let device = Device::Cpu;
+        let (rows, kv_heads, head_dim) = (3, 2, 8);
+        let mut forked = LayerCache::new(KvCacheKind::Prealloc, 16);
+        let mut repeated = LayerCache::new(KvCacheKind::Prealloc, 16);
+        let k = Tensor::rand(0f32, 1., (1, 5, kv_heads, head_dim), &device)?.transpose(1, 2)?;
+        let v = (&k + 1.0)?;
+        forked.append(k.clone(), v.clone())?;
+        forked.fork_prealloc(rows)?;
+        repeated.append(k.repeat((rows, 1, 1, 1))?, v.repeat((rows, 1, 1, 1))?)?;
+        let k = Tensor::rand(0f32, 1., (rows, 2, kv_heads, head_dim), &device)?.transpose(1, 2)?;
+        let v = (&k + 2.0)?;
+        let (fk, fv) = forked.append(k.clone(), v.clone())?;
+        let (rk, rv) = repeated.append(k, v)?;
+        assert_eq!(fk.dims(), [rows, kv_heads, 7, head_dim]);
+        let diff = |a: &Tensor, b: &Tensor| -> Result<f32> {
+            (a - b)?.abs()?.flatten_all()?.max(0)?.to_scalar()
+        };
+        assert_eq!(diff(&fk, &rk)?, 0.0);
+        assert_eq!(diff(&fv, &rv)?, 0.0);
+        Ok(())
     }
 
     /// The paged cache returns the same keys and values as `prealloc`, for

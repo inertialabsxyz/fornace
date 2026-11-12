@@ -57,10 +57,21 @@ struct Args {
     #[arg(long, value_name = "N")]
     kv_capacity: Option<NonZeroUsize>,
     /// Run the batch with a shared prefix: true, false, or both, separated
-    /// by commas. Only paged rows with a batch above 1 use true. They have
-    /// `shared` in the tag column.
+    /// by commas. The engine prefills the tokens that all sequences have in
+    /// common at the start once. Only paged and prealloc rows with a batch
+    /// above 1 use true. They have `shared` in the tag column.
     #[arg(long, value_delimiter = ',', default_value = "false", action = ArgAction::Set)]
     share_prefix: Vec<bool>,
+    /// A text file for a different end of each sequence. Sequence b is the
+    /// prompt, then tokens b × N to (b + 1) × N of this file, with N from
+    /// --suffix-tokens. So all sequences share the prompt (a "system
+    /// prompt") and have their own "user message". A row with this flag has
+    /// `suffix=<file>:<N>` in the tag column.
+    #[arg(long, value_name = "FILE")]
+    suffix: Option<PathBuf>,
+    /// The tokens of each sequence from --suffix.
+    #[arg(long, value_name = "N", default_value = "64")]
+    suffix_tokens: NonZeroUsize,
     /// The batch sizes, separated by commas. A batch of B runs B copies of
     /// the prompt at the same time.
     #[arg(long, value_delimiter = ',', default_value = "1")]
@@ -203,15 +214,36 @@ struct Set {
 }
 
 /// The (block size, shared prefix) pairs for one KV cache. Only the paged
-/// cache has more than one.
+/// cache has block sizes. Only the paged and prealloc caches share.
 fn cache_variants(args: &Args, kv_cache: KvCacheKind) -> Vec<(NonZeroUsize, bool)> {
-    if kv_cache != KvCacheKind::Paged {
-        return vec![(NonZeroUsize::new(DEFAULT_BLOCK_SIZE).unwrap(), false)];
+    let default = NonZeroUsize::new(DEFAULT_BLOCK_SIZE).unwrap();
+    match kv_cache {
+        KvCacheKind::Paged => args
+            .block_size
+            .iter()
+            .flat_map(|&b| args.share_prefix.iter().map(move |&s| (b, s)))
+            .collect(),
+        KvCacheKind::Prealloc => args.share_prefix.iter().map(|&s| (default, s)).collect(),
+        _ => vec![(default, false)],
     }
-    args.block_size
-        .iter()
-        .flat_map(|&b| args.share_prefix.iter().map(move |&s| (b, s)))
-        .collect()
+}
+
+/// The token rows of a batch: `prompt` in each row, then a different
+/// window of `n` tokens of `suffix` for each row.
+fn suffix_rows(prompt: &[u32], suffix: &[u32], batch: usize, n: usize) -> Result<Vec<Vec<u32>>> {
+    if suffix.len() < batch * n {
+        return Err(format!(
+            "--suffix has {} tokens, a batch of {batch} needs {}",
+            suffix.len(),
+            batch * n
+        )
+        .into());
+    }
+    Ok(suffix
+        .chunks(n)
+        .take(batch)
+        .map(|window| [prompt, window].concat())
+        .collect())
 }
 
 /// Starts this program again as a worker for one set and reads its rows.
@@ -239,6 +271,12 @@ fn run_worker(args: &Args, commit: &str, date: &str, set: &Set) -> Result<Vec<Ro
         .args(["--batch", &batch.to_string()])
         .args(["--block-size", &block_size.to_string()])
         .args(["--share-prefix", &share_prefix.to_string()])
+        .args(["--suffix-tokens", &args.suffix_tokens.to_string()])
+        .args(
+            args.suffix
+                .iter()
+                .flat_map(|q| [std::ffi::OsStr::new("--suffix"), q.as_os_str()]),
+        )
         .args(
             args.kv_capacity
                 .iter()
@@ -306,12 +344,21 @@ fn worker(args: &Args) -> Result<()> {
         let prompt = std::fs::read_to_string(prompt_path)
             .map_err(|e| format!("cannot read {}: {e}", prompt_path.display()))?;
         let prompt_file = file_name(prompt_path);
-        let prompts = vec![prompt.as_str(); config.batch];
+        let tokens = engine.tokenize(&prompt)?;
+        let batch_rows = match &args.suffix {
+            None => vec![tokens; config.batch],
+            Some(path) => {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                let suffix = engine.tokenize(&text)?;
+                suffix_rows(&tokens, &suffix, config.batch, args.suffix_tokens.get())?
+            }
+        };
         for _ in 0..args.warmup {
-            engine.generate_batch(&prompts)?;
+            engine.generate_tokens(&batch_rows)?;
         }
         for run in 1..=args.repeats {
-            let report = engine.generate_batch(&prompts)?;
+            let report = engine.generate_tokens(&batch_rows)?;
             let row = Row {
                 commit: args.commit.clone().unwrap_or_else(git_commit),
                 date: args.date.clone().unwrap_or_else(today),
@@ -335,7 +382,7 @@ fn worker(args: &Args) -> Result<()> {
                 tag: row_tag(
                     &args.tag,
                     config.attention,
-                    &cache_tag(&config),
+                    &[cache_tag(&config), suffix_tag(args)].concat(),
                     quality_file.as_deref(),
                 ),
             };
@@ -349,6 +396,10 @@ fn worker(args: &Args) -> Result<()> {
                     b.waste() * 100.0
                 )
             });
+            let blocks = format!(
+                "{blocks}, shared prefix {} tokens",
+                report.shared_prefix_tokens
+            );
             eprintln!(
                 "{} {} batch {} {} run {run}/{}: {:.1} decode tok/s total, ttft {:.1} ms{blocks}",
                 row.dtype,
@@ -382,20 +433,29 @@ fn worker(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// The cache settings for the tag column: `block=<N>` and `shared` for the
-/// paged cache, and `capacity=<N>` if --kv-capacity is given.
+/// The cache settings for the tag column: `block=<N>` for the paged
+/// cache, `shared` for a shared prefix, and `capacity=<N>` if
+/// --kv-capacity is given.
 fn cache_tag(config: &LoadConfig) -> Vec<String> {
     let mut tags = Vec::new();
     if config.kv_cache == KvCacheKind::Paged {
         tags.push(format!("block={}", config.block_size));
-        if config.share_prefix && config.batch > 1 {
-            tags.push("shared".to_string());
-        }
+    }
+    if config.share_prefix && config.batch > 1 {
+        tags.push("shared".to_string());
     }
     if let Some(capacity) = config.kv_capacity {
         tags.push(format!("capacity={capacity}"));
     }
     tags
+}
+
+/// `suffix=<file>:<N>` if --suffix is given.
+fn suffix_tag(args: &Args) -> Vec<String> {
+    args.suffix
+        .iter()
+        .map(|path| format!("suffix={}:{}", file_name(path), args.suffix_tokens))
+        .collect()
 }
 
 /// The tag column: the --tag text, plus `attention=fused` if the attention
@@ -632,6 +692,10 @@ mod tests {
             cache_tag(&config(KvCacheKind::Paged, 4, true)),
             ["block=64", "shared"]
         );
+        assert_eq!(
+            cache_tag(&config(KvCacheKind::Prealloc, 4, true)),
+            ["shared"]
+        );
         let mut reserved = config(KvCacheKind::Prealloc, 1, false);
         reserved.kv_capacity = Some(32768);
         assert_eq!(cache_tag(&reserved), ["capacity=32768"]);
@@ -646,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_paged_cache_gets_block_sizes_and_sharing() {
+    fn only_paged_gets_block_sizes_and_only_paged_and_prealloc_share() {
         let base = ["fornace-bench", "--model", "m"];
         let flags = ["--block-size", "8,16", "--share-prefix", "false,true"];
         let args = Args::try_parse_from(base.iter().chain(&flags)).unwrap();
@@ -656,11 +720,22 @@ mod tests {
                 .map(|(b, s)| (b.get(), s))
                 .collect()
         };
-        assert_eq!(sizes(KvCacheKind::Prealloc), [(16, false)]);
+        assert_eq!(sizes(KvCacheKind::Prealloc), [(16, false), (16, true)]);
+        assert_eq!(sizes(KvCacheKind::Cat), [(16, false)]);
         assert_eq!(
             sizes(KvCacheKind::Paged),
             [(8, false), (8, true), (16, false), (16, true)]
         );
+    }
+
+    #[test]
+    fn suffix_rows_share_the_prompt_and_differ_at_the_end() {
+        let rows = suffix_rows(&[1, 2], &[10, 11, 12, 13, 14, 15, 16], 3, 2).unwrap();
+        assert_eq!(
+            rows,
+            [vec![1, 2, 10, 11], vec![1, 2, 12, 13], vec![1, 2, 14, 15]]
+        );
+        assert!(suffix_rows(&[1], &[10, 11, 12], 2, 2).is_err());
     }
 
     #[test]

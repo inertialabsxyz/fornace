@@ -28,7 +28,8 @@
 //! - a paged KV cache (`KvCacheKind::Paged`, `reset_paged_kv_cache`). The
 //!   model owns the block tables. It gives each layer the write and read
 //!   slots of the step, and each layer gathers K and V before attention.
-//!   `fork_kv_cache` makes B rows that share the blocks of one prompt.
+//!   `fork_kv_cache` makes B rows from one prefill: with shared blocks
+//!   (paged), or with one copy (prealloc).
 //!
 //! The original documentation follows.
 //!
@@ -716,13 +717,17 @@ impl Model {
         self.paged = Some(cache);
     }
 
-    /// Makes `rows` rows from the one row of a paged cache, for example
-    /// after the prefill of one prompt. The rows share the full blocks of
-    /// the prompt. Each new row gets a copy of the last block if it is not
-    /// full.
+    /// Makes `rows` rows from the one row of the cache, for example after
+    /// the prefill of a shared prefix. A paged cache shares the full blocks
+    /// of the prefix, and each new row gets a copy of the last block if it
+    /// is not full. A `Prealloc` cache copies the prefix into `rows` rows.
     pub fn fork_kv_cache(&mut self, rows: usize) -> Result<()> {
         let Some(cache) = &mut self.paged else {
-            candle_core::bail!("only the paged KV cache can fork")
+            let _span = device_debug_span!(&self.device, self.sync_spans, "prealloc.fork")?;
+            for layer in self.layers.iter_mut() {
+                layer.self_attn.kv_cache.fork_prealloc(rows)?;
+            }
+            return Ok(());
         };
         let (from, to) = cache.fork(rows)?;
         if from.is_empty() {

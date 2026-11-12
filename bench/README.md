@@ -32,10 +32,16 @@ cargo run --release -p fornace-bench -- \
   run knows in advance. `prealloc` reserves this many positions. The
   `paged` pool holds this many positions for each sequence, in blocks.
 - `--share-prefix <LIST>`: `false`, `true`, or `false,true`. The default
-  is `false`. With `true`, a `paged` row with a batch above 1 prefills
-  the prompt once, and all sequences share its full blocks. Each
-  sequence gets a copy of the last block if it is not full. Other rows
-  use only `false`.
+  is `false`. With `true`, a row with a batch above 1 prefills the tokens
+  that all sequences have in common at the start (the shared prefix)
+  once, as one sequence. Then it prefills the rest of each sequence as a
+  batch. `paged` shares the full blocks of the prefix, and each sequence
+  gets a copy of the last block if it is not full. `prealloc` copies the
+  prefix into each sequence once. Other caches use only `false`.
+- `--suffix <FILE>` and `--suffix-tokens <N>` (default 64): give each
+  sequence its own end. Sequence b is the prompt, then tokens b × N to
+  (b + 1) × N of the file. So all sequences share the prompt, as a system
+  prompt, and each has its own user message.
 - `--batch <LIST>`: the batch sizes, separated by commas. A batch of B runs
   B copies of the prompt at the same time. The default is `1`.
 - `--attention <KIND>`: `naive` or `fused`. The default is `naive`. Fused
@@ -87,7 +93,7 @@ step makes one token for each sequence.
 At batch 1, these are the same as the numbers for one sequence.
 
 With a shared prefix (`shared` in the tag), the prefill computes the
-prompt once, not B times. `prefill_tok_s` keeps its definition, B × T /
+shared tokens once, not B times. `prefill_tok_s` keeps its definition, B × T /
 prefill time, so it counts the shared tokens B times. Compare
 `ttft_ms` instead.
 
@@ -119,4 +125,4 @@ The columns are in this order. Each row is one recorded generation.
 - `decode_ms_mean_last64`: the mean time of the last 64 decode steps, in milliseconds. One step makes one token for each sequence. If there are fewer than 64 steps, the mean of all steps.
 - `peak_mem_mb`: the peak memory of the process, in MiB, with one decimal. On macOS this is the physical footprint, which includes Metal buffers. On Linux it is the peak RSS. Each `dtype`, `kv_cache`, and `batch` runs in its own process, so the peak is for that set only. In one set, the peak of a prompt includes the prompts that ran before it.
 - `quality`: the perplexity of the model on the `--quality` text, with 3 decimals, or empty without `--quality`. Perplexity is exp of the mean of −log p(next token) over all tokens after the first, with no repeat penalty. Lower is better.
-- `tag`: the text of `--tag`, then `attention=fused` for fused attention, then `block=<N>` for a `paged` row, then `shared` for a shared prefix, then `capacity=<N>` for `--kv-capacity`, then `quality=<file name>` for the `--quality` text, separated by `; `. Empty if none applies.
+- `tag`: the text of `--tag`, then `attention=fused` for fused attention, then `block=<N>` for a `paged` row, then `shared` for a shared prefix (`paged` or `prealloc`), then `capacity=<N>` for `--kv-capacity`, then `suffix=<file>:<N>` for `--suffix`, then `quality=<file name>` for the `--quality` text, separated by `; `. Empty if none applies.

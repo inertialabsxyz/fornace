@@ -9,8 +9,12 @@
 //! The paged cache copies the same values into the same layout before
 //! attention, so the logits must be equal, not only close.
 //!
-//! The shared-prefix test runs one prefill and forks it into 4 rows. It
-//! compares the rows with 4 rows that each run their own prefill.
+//! The shared-prefix tests prefill the start that all rows have in common
+//! once, fork it into 4 rows, and prefill the rest of each row as a batch.
+//! They compare the rows with 4 rows that each run their own prefill, for
+//! the paged cache (shared blocks) and for `prealloc` (one copy). There are
+//! two prompt sets: 4 copies of one prompt, and one "system prompt" with 4
+//! different "user messages".
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +31,8 @@ use fornace_engine::{
 use tokenizers::Tokenizer;
 
 const PROMPT_TOKENS: usize = 512;
+/// The shared "system prompt" of the second shared-prefix set.
+const SYSTEM_TOKENS: usize = 448;
 const STEPS: usize = 16;
 /// 1 gives one block for each position. 7 does not divide 512, so the last
 /// block of the prompt is not full.
@@ -37,8 +43,9 @@ const BLOCK_SIZES: [usize; 3] = [1, DEFAULT_BLOCK_SIZE, 7];
 enum Cache {
     Prealloc,
     Paged(usize),
-    /// Paged, with one prefill of the first prompt, forked into all rows.
-    Shared(usize),
+    /// One prefill of the shared prefix, forked into all rows: paged with
+    /// this block size, or `prealloc` for `None`.
+    Shared(Option<usize>),
 }
 
 fn argmax(logits: &[f32]) -> usize {
@@ -87,15 +94,29 @@ fn run(
             let input = Tensor::from_vec(prompts.concat(), (batch, len), device).unwrap();
             rows(model.forward(&input, 0).unwrap(), batch)
         }
-        Cache::Shared(block_size) => {
-            model.reset_paged_kv_cache(block_size, batch * capacity.div_ceil(block_size));
-            let input = Tensor::new(prompts[0], device)
+        Cache::Shared(paged) => {
+            match paged {
+                Some(block_size) => {
+                    model.reset_paged_kv_cache(block_size, batch * capacity.div_ceil(block_size))
+                }
+                None => model.reset_kv_cache(KvCacheKind::Prealloc, capacity),
+            }
+            let prefix = common_prefix(prompts);
+            let input = Tensor::new(&prompts[0][..prefix], device)
                 .unwrap()
                 .unsqueeze(0)
                 .unwrap();
-            let one = rows(model.forward(&input, 0).unwrap(), 1);
-            model.fork_kv_cache(batch).unwrap();
-            vec![one[0].clone(); batch]
+            if prefix == len {
+                let one = rows(model.forward(&input, 0).unwrap(), 1);
+                model.fork_kv_cache(batch).unwrap();
+                vec![one[0].clone(); batch]
+            } else {
+                model.hidden_states(&input, 0).unwrap();
+                model.fork_kv_cache(batch).unwrap();
+                let rest: Vec<u32> = prompts.iter().flat_map(|p| &p[prefix..]).copied().collect();
+                let input = Tensor::from_vec(rest, (batch, len - prefix), device).unwrap();
+                rows(model.forward(&input, prefix).unwrap(), batch)
+            }
         }
     };
     let mut logits = vec![first];
@@ -114,6 +135,45 @@ fn run(
         logits.push(rows(model.forward(&input, len + step).unwrap(), batch));
     }
     (logits, tokens)
+}
+
+/// The number of tokens at the start that all prompts have in common.
+fn common_prefix(prompts: &[&[u32]]) -> usize {
+    prompts[1..].iter().fold(prompts[0].len(), |len, p| {
+        prompts[0]
+            .iter()
+            .zip(*p)
+            .take(len)
+            .take_while(|(a, b)| a == b)
+            .count()
+    })
+}
+
+/// The tokens of 4 rows of 512: 4 copies of `alice-512.txt`, and a
+/// "system prompt" of its first 448 tokens with 4 different "user
+/// messages" of 64 tokens from `alice-2048.txt`.
+fn shared_sets(tokenizer: &Tokenizer) -> Vec<(&'static str, Vec<Vec<u32>>)> {
+    let prompts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/prompts");
+    let ids = |name: &str| -> Vec<u32> {
+        let text = std::fs::read_to_string(prompts_dir.join(name)).unwrap();
+        let ids = tokenizer.encode(text.trim_end_matches('\n'), true).unwrap();
+        ids.get_ids().to_vec()
+    };
+    let one = ids("alice-512.txt");
+    let long = ids("alice-2048.txt");
+    let system = one[..SYSTEM_TOKENS].to_vec();
+    let users = (0..4).map(|b| {
+        let start = 1024 + b * 97;
+        [
+            &system[..],
+            &long[start..start + PROMPT_TOKENS - SYSTEM_TOKENS],
+        ]
+        .concat()
+    });
+    vec![
+        ("4 copies", vec![one; 4]),
+        ("system + 4 users", users.collect()),
+    ]
 }
 
 /// The largest logit difference between two runs, over all steps and rows.
@@ -260,9 +320,11 @@ fn paged_equals_prealloc_on_metal_in_q4() {
     );
 }
 
-/// One prefill forked into 4 rows against 4 prefills of the same prompt.
-/// The prefill of one row and of 4 rows can round differently, so this
-/// compares with a tolerance, and asserts the block counts.
+/// One prefill of the shared prefix, forked into 4 rows, against 4 full
+/// prefills, for both prompt sets, the paged cache, and `prealloc`. The
+/// prefill of one row and of 4 rows can round differently, so this
+/// compares with a tolerance. For the paged cache, it also asserts the
+/// block counts.
 fn shared_prefix_matches_four_prefills(
     label: &str,
     model: &mut ModelForCausalLM,
@@ -270,31 +332,35 @@ fn shared_prefix_matches_four_prefills(
     device: &Device,
     tolerance: f32,
 ) {
-    let (_, one) = prompts(tokenizer).remove(0);
-    let copies: Vec<&[u32]> = vec![one[0].as_slice(); 4];
-    for block_size in [DEFAULT_BLOCK_SIZE, 7] {
-        let (want, tokens) = run(model, Cache::Paged(block_size), &copies, None, device);
-        let unshared = model.kv_block_usage().unwrap();
-        let (got, _) = run(
-            model,
-            Cache::Shared(block_size),
-            &copies,
-            Some(&tokens),
-            device,
-        );
-        let shared = model.kv_block_usage().unwrap();
-        let diff = max_diff(&want, &got);
-        eprintln!(
-            "{label} block {block_size}: max |4 prefills - 1 shared prefill| = {diff}; blocks in use {} unshared, {} shared",
-            unshared.in_use, shared.in_use
-        );
-        assert!(diff <= tolerance, "{label} block {block_size}: diff {diff}");
-        // Each row holds 512 + 15 positions. Shared: the full prompt blocks
-        // once, and a copy of the last block and the new blocks per row.
-        let per_row = (PROMPT_TOKENS + STEPS - 1).div_ceil(block_size);
-        let full_prompt = PROMPT_TOKENS / block_size;
-        assert_eq!(unshared.in_use, 4 * per_row);
-        assert_eq!(shared.in_use, full_prompt + 4 * (per_row - full_prompt));
+    for (name, set) in shared_sets(tokenizer) {
+        let refs: Vec<&[u32]> = set.iter().map(Vec::as_slice).collect();
+        let prefix = common_prefix(&refs);
+        for paged in [Some(DEFAULT_BLOCK_SIZE), Some(7), None] {
+            let alone = match paged {
+                Some(block_size) => Cache::Paged(block_size),
+                None => Cache::Prealloc,
+            };
+            let (want, tokens) = run(model, alone, &refs, None, device);
+            let unshared = model.kv_block_usage();
+            let (got, _) = run(model, Cache::Shared(paged), &refs, Some(&tokens), device);
+            let shared = model.kv_block_usage();
+            let diff = max_diff(&want, &got);
+            let cache = paged.map_or("prealloc".to_string(), |b| format!("paged block {b}"));
+            eprintln!(
+                "{label} {name} {cache}: prefix {prefix}, max |4 prefills - 1 shared prefill| = {diff}; blocks in use {:?} unshared, {:?} shared",
+                unshared.map(|u| u.in_use),
+                shared.map(|u| u.in_use)
+            );
+            assert!(diff <= tolerance, "{label} {name} {cache}: diff {diff}");
+            if let (Some(block_size), Some(unshared), Some(shared)) = (paged, unshared, shared) {
+                // Each row holds 512 + 15 positions. Shared: the full
+                // blocks of the prefix once, and the rest of each row.
+                let per_row = (PROMPT_TOKENS + STEPS - 1).div_ceil(block_size);
+                let full = prefix / block_size;
+                assert_eq!(unshared.in_use, 4 * per_row);
+                assert_eq!(shared.in_use, full + 4 * (per_row - full));
+            }
+        }
     }
 }
 
@@ -329,18 +395,19 @@ fn shared_prefix_matches_four_prefills_on_metal() {
 
 /// Through the engine: each row of a shared-prefix batch gives the text of
 /// `generate` with the same prompt, and the batch uses fewer blocks than
-/// the same batch without sharing.
+/// the same batch without sharing. Rows with a common start and a
+/// different end share the common start, for both caches.
 #[test]
 fn engine_shared_prefix_rows_equal_generate_on_the_cpu() {
     let Some(dir) = model_dir() else { return };
-    let load = |share_prefix: bool| {
+    let load_kind = |kv_cache: KvCacheKind, share_prefix: bool| {
         Engine::load(&LoadConfig {
             model_dir: dir.clone(),
             dtype: Dtype::F16,
             device: DeviceKind::Cpu,
             max_new_tokens: 16,
             batch: 4,
-            kv_cache: KvCacheKind::Paged,
+            kv_cache,
             block_size: DEFAULT_BLOCK_SIZE,
             kv_capacity: None,
             share_prefix,
@@ -350,6 +417,7 @@ fn engine_shared_prefix_rows_equal_generate_on_the_cpu() {
         })
         .unwrap()
     };
+    let load = |share_prefix: bool| load_kind(KvCacheKind::Paged, share_prefix);
     // Longer than one block, so that the rows share at least one block.
     let prompt = "The capital of France is Paris. The capital of Germany is Berlin. \
                   The capital of Spain is";
@@ -363,8 +431,23 @@ fn engine_shared_prefix_rows_equal_generate_on_the_cpu() {
     let (s, u) = (shared.kv_blocks.unwrap(), unshared.kv_blocks.unwrap());
     eprintln!("blocks in use: {} shared, {} unshared", s.in_use, u.in_use);
     assert!(s.in_use < u.in_use);
+    let start = "The capital of France is Paris. The capital of Germany is Berlin. ";
+    let prompts = [
+        format!("{start}The capital of Spain is"),
+        format!("{start}The capital of Italy is"),
+    ];
+    let prompts = [prompts[0].as_str(), prompts[1].as_str()];
+    for kind in [KvCacheKind::Paged, KvCacheKind::Prealloc] {
+        let mut engine = load_kind(kind, true);
+        let report = engine.generate_batch(&prompts).unwrap();
+        assert!(report.shared_prefix_tokens > 0, "{kind}");
+        assert!(report.shared_prefix_tokens < report.prompt_tokens, "{kind}");
+        for (prompt, text) in prompts.iter().zip(&report.texts) {
+            assert_eq!(&engine.generate(prompt).unwrap().texts[0], text, "{kind}");
+        }
+    }
     assert!(matches!(
-        engine.generate_batch(&["The capital of Spain is", "The capital of Italy is"]),
-        Err(Error::SharePrefixNeedsOnePrompt)
+        load_kind(KvCacheKind::Cat, true).generate_batch(&prompts),
+        Err(Error::SharePrefixNeedsPagedOrPrealloc(KvCacheKind::Cat))
     ));
 }

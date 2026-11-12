@@ -76,10 +76,8 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("--share-prefix needs --kv-cache paged, not {0}")]
-    SharePrefixNeedsPaged(KvCacheKind),
-    #[error("--share-prefix needs the same prompt in every row")]
-    SharePrefixNeedsOnePrompt,
+    #[error("--share-prefix needs --kv-cache paged or prealloc, not {0}")]
+    SharePrefixNeedsPagedOrPrealloc(KvCacheKind),
     #[error("the block size must be at least 1")]
     ZeroBlockSize,
     #[error("perplexity needs at least 2 tokens, the text has {0}")]
@@ -188,8 +186,10 @@ pub struct LoadConfig {
     /// or a server does not know the length, and must reserve more. For
     /// `Paged`, the pool holds this many positions for each row, in blocks.
     pub kv_capacity: Option<usize>,
-    /// With `Paged` and B copies of one prompt: prefill the prompt once, and
-    /// let the B rows share its blocks.
+    /// For a batch, prefill the tokens that all rows have in common at the
+    /// start (the shared prefix) once, as one row. Then fork the cache into
+    /// B rows, and prefill the rest of each row as a batch. `Paged` shares
+    /// the blocks of the prefix. `Prealloc` copies the prefix into each row.
     pub share_prefix: bool,
     /// How each attention layer computes attention.
     pub attention: AttentionKind,
@@ -230,6 +230,9 @@ pub struct GenerationReport {
     /// The blocks of the paged cache at the end of the run, or `None` for
     /// the other caches.
     pub kv_blocks: Option<BlockUsage>,
+    /// The prompt tokens that were prefilled once for all rows. 0 if the
+    /// rows did not share a prefix.
+    pub shared_prefix_tokens: usize,
 }
 
 /// A loaded model that generates text.
@@ -365,7 +368,7 @@ impl Engine {
         if ids.len() < 2 {
             return Err(Error::TextTooShort(ids.len()));
         }
-        self.reset_kv_cache(1, ids.len(), ids.len(), false);
+        self.reset_kv_cache(1, 0, ids.len());
         let input = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
         let hidden = self.model.hidden_states(&input, 0)?.squeeze(0)?;
         let targets = Tensor::new(&ids[1..], &self.device)?;
@@ -389,52 +392,67 @@ impl Engine {
         self.generate_batch(&[prompt])
     }
 
+    /// The token ids of `text`, as `generate_batch` makes them.
+    pub fn tokenize(&self, text: &str) -> Result<Vec<u32>> {
+        self.tokenizer
+            .encode(text, true)
+            .map(|ids| ids.get_ids().to_vec())
+            .map_err(Error::TokenEncoding)
+    }
+
     /// Generates text that continues each prompt, with all prompts in one
     /// batch. All prompts must have the same token count, because the batch
     /// has no padding. Each row has its own sampler and its own repeat
     /// penalty. If EOS is not ignored, the batch stops when any row samples
     /// EOS, so all rows have the same number of tokens.
     pub fn generate_batch(&mut self, prompts: &[&str]) -> Result<GenerationReport> {
-        if prompts.is_empty() {
-            return Err(Error::EmptyBatch);
-        }
-        let batch = prompts.len();
-        let sync = self.load_config.sync_spans;
-        let _generate = device_span!(&self.device, sync, "generate", batch)?;
         let start = Instant::now();
         let rows = {
             let _span = tracing::info_span!("tokenize").entered();
             prompts
                 .iter()
-                .map(|prompt| {
-                    self.tokenizer
-                        .encode(*prompt, true)
-                        .map(|ids| ids.get_ids().to_vec())
-                        .map_err(Error::TokenEncoding)
-                })
+                .map(|prompt| self.tokenize(prompt))
                 .collect::<Result<Vec<_>>>()?
         };
+        self.generate_rows(&rows, start)
+    }
+
+    /// [`Engine::generate_batch`] with token ids in place of text.
+    pub fn generate_tokens(&mut self, rows: &[Vec<u32>]) -> Result<GenerationReport> {
+        self.generate_rows(rows, Instant::now())
+    }
+
+    fn generate_rows(&mut self, rows: &[Vec<u32>], start: Instant) -> Result<GenerationReport> {
+        if rows.is_empty() {
+            return Err(Error::EmptyBatch);
+        }
+        let batch = rows.len();
+        let sync = self.load_config.sync_spans;
+        let _generate = device_span!(&self.device, sync, "generate", batch)?;
         let prompt_tokens = rows[0].len();
         if rows.iter().any(|ids| ids.len() != prompt_tokens) {
             return Err(Error::UnequalPromptLengths(
                 rows.iter().map(Vec::len).collect(),
             ));
         }
-        if self.load_config.share_prefix {
-            if self.load_config.kv_cache != KvCacheKind::Paged {
-                return Err(Error::SharePrefixNeedsPaged(self.load_config.kv_cache));
-            }
-            if rows.iter().any(|ids| ids != &rows[0]) {
-                return Err(Error::SharePrefixNeedsOnePrompt);
-            }
+        let kind = self.load_config.kv_cache;
+        if self.load_config.share_prefix
+            && !matches!(kind, KvCacheKind::Paged | KvCacheKind::Prealloc)
+        {
+            return Err(Error::SharePrefixNeedsPagedOrPrealloc(kind));
         }
-        let shared = self.load_config.share_prefix && batch > 1;
+        let prefix = if self.load_config.share_prefix && batch > 1 {
+            common_prefix(rows)
+        } else {
+            0
+        };
+        let shared = prefix > 0;
         let capacity = self
             .load_config
             .kv_capacity
             .unwrap_or(prompt_tokens + self.load_config.max_new_tokens);
         // The cache tensors take the batch dimension from the first append.
-        self.reset_kv_cache(batch, prompt_tokens, capacity, shared);
+        self.reset_kv_cache(batch, prefix, capacity);
         // End of sequence, ChatML
         let eos = [
             self.tokenizer.token_to_id("<|im_end|>"),
@@ -453,31 +471,43 @@ impl Engine {
         )?;
         let logits = {
             let _span = device_span!(&self.device, sync, "forward")?;
-            // A shared prefix runs the prompt once, as one row. The fork
-            // then makes the other rows, which share its blocks.
-            let input = if shared {
-                Tensor::new(rows[0].as_slice(), &self.device)?.unsqueeze(0)?
-            } else {
-                Tensor::from_vec(rows.concat(), (batch, prompt_tokens), &self.device)?
-            };
-            // [B, 1, vocab] to [B, vocab]
-            let logits = self
-                .model
-                .forward(&input, 0)?
-                .squeeze(1)?
-                .to_dtype(DType::F32)?;
+            // A shared prefix runs once, as one row. The fork then makes
+            // the other rows. The rest of each row runs as a batch after it.
             if shared {
-                self.model.fork_kv_cache(batch)?;
+                let input = Tensor::new(&rows[0][..prefix], &self.device)?.unsqueeze(0)?;
+                if prefix == prompt_tokens {
+                    let logits = self.model.forward(&input, 0)?;
+                    self.model.fork_kv_cache(batch)?;
+                    logits.squeeze(1)?.to_dtype(DType::F32)?
+                } else {
+                    self.model.hidden_states(&input, 0)?;
+                    self.model.fork_kv_cache(batch)?;
+                    let tail: Vec<u32> = rows.iter().flat_map(|r| &r[prefix..]).copied().collect();
+                    let input =
+                        Tensor::from_vec(tail, (batch, prompt_tokens - prefix), &self.device)?;
+                    self.model
+                        .forward(&input, prefix)?
+                        .squeeze(1)?
+                        .to_dtype(DType::F32)?
+                }
+            } else {
+                let input = Tensor::from_vec(rows.concat(), (batch, prompt_tokens), &self.device)?;
+                // [B, 1, vocab] to [B, vocab]
+                self.model
+                    .forward(&input, 0)?
+                    .squeeze(1)?
+                    .to_dtype(DType::F32)?
             }
-            logits
         };
+        // One prompt in all rows: one set of logits for all rows.
+        let one_row = shared && prefix == prompt_tokens;
 
         let mut next = {
             let _span = device_span!(&self.device, sync, "sample")?;
             samplers
                 .iter_mut()
                 .enumerate()
-                .map(|(b, sampler)| sampler.sample(&logits.get(if shared { 0 } else { b })?))
+                .map(|(b, sampler)| sampler.sample(&logits.get(if one_row { 0 } else { b })?))
                 .collect::<candle_core::Result<Vec<u32>>>()?
         };
         drop(prefill);
@@ -563,30 +593,39 @@ impl Engine {
             texts,
             decode_token_ms,
             kv_blocks: self.model.kv_block_usage(),
+            shared_prefix_tokens: prefix,
         })
     }
 
-    /// Empties the KV cache before a run of `rows` rows of `prompt_tokens`
-    /// tokens. Each row gets room for `capacity` positions. For `Paged`,
-    /// the pool has the blocks that the run can need. With `shared`, the
-    /// rows share the full blocks of the prompt, so the pool needs them
-    /// only once.
-    fn reset_kv_cache(&mut self, rows: usize, prompt_tokens: usize, capacity: usize, shared: bool) {
+    /// Empties the KV cache before a run of `rows` rows. Each row gets room
+    /// for `capacity` positions. For `Paged`, the pool has the blocks that
+    /// the run can need. The rows share the full blocks of the first
+    /// `shared_prefix` positions, so the pool needs those blocks only once.
+    fn reset_kv_cache(&mut self, rows: usize, shared_prefix: usize, capacity: usize) {
         match self.load_config.kv_cache {
             KvCacheKind::Paged => {
                 let block_size = self.load_config.block_size;
                 let per_row = capacity.div_ceil(block_size);
-                let blocks = if shared {
-                    let full_prompt = prompt_tokens / block_size;
-                    per_row + (rows - 1) * per_row.saturating_sub(full_prompt)
-                } else {
-                    rows * per_row
-                };
+                let shared_blocks = shared_prefix / block_size;
+                let blocks = per_row + (rows - 1) * per_row.saturating_sub(shared_blocks);
                 self.model.reset_paged_kv_cache(block_size, blocks)
             }
             kind => self.model.reset_kv_cache(kind, capacity),
         }
     }
+}
+
+/// The number of tokens at the start that all rows have in common.
+fn common_prefix(rows: &[Vec<u32>]) -> usize {
+    let first = &rows[0];
+    rows[1..].iter().fold(first.len(), |len, row| {
+        first
+            .iter()
+            .zip(row)
+            .take(len)
+            .take_while(|(a, b)| a == b)
+            .count()
+    })
 }
 
 #[cfg(test)]
@@ -599,6 +638,17 @@ mod tests {
             assert_eq!(d.to_string().parse::<Dtype>(), Ok(d));
         }
         assert!("q2".parse::<Dtype>().is_err());
+    }
+
+    #[test]
+    fn common_prefix_is_the_shared_start_of_all_rows() {
+        assert_eq!(common_prefix(&[vec![1, 2, 3], vec![1, 2, 3]]), 3);
+        assert_eq!(
+            common_prefix(&[vec![1, 2, 3], vec![1, 2, 4], vec![1, 5, 3]]),
+            1
+        );
+        assert_eq!(common_prefix(&[vec![1, 2], vec![3, 2]]), 0);
+        assert_eq!(common_prefix(&[vec![7, 8]]), 2);
     }
 
     #[test]
