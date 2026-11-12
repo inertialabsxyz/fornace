@@ -1,0 +1,43 @@
+# 2026-11-12, commit 9673634, Apple M4 Pro. Traced (GPU waits at each span): use to explain only, not for speeds.
+# fornace --model models/qwen2.5-1.5b-instruct --attention fused --ignore-eos --max-new-tokens 128 --prompt "$(cat bench/prompts/alice-512.txt)"  --trace summary --trace-filter fornace_engine=debug
+
+Trace summary. The report above includes the GPU waits of --trace.
+span                           count   total ms   mean ms   p50 ms   p95 ms  % parent  Δmem MB  metal MB
+load                               1      489.4    489.38   489.38   489.38         -   3267.6         -
+  load.tokenizer                   1       83.0     83.02    83.02    83.02      17.0     54.7         -
+  load.config                      1        0.3      0.25     0.25     0.25       0.1      0.0         -
+  load.weights                     1        0.2      0.23     0.23     0.23       0.0      0.4       0.0
+  load.model                       1      396.0    396.03   396.03   396.03      80.9   3210.0    3095.8
+tokenize                           1        0.7      0.70     0.70     0.70         -      0.4         -
+generate                           1     6033.4   6033.41  6033.41  6033.41         -     23.7      29.6
+  prefill                          1      341.3    341.28   341.28   341.28       5.7     14.1      31.7
+    forward                        1      341.0    341.02   341.02   341.02      99.9     14.5      31.7
+      mask                         1        0.0      0.00     0.00     0.00       0.0      0.0       0.0
+      embed                        1        1.4      1.38     1.38     1.38       0.4    -23.0       2.1
+      layer                       28      336.1     12.00    11.13    11.75      98.6     91.6      29.4
+        attn                      28      116.6      4.16     3.70     4.17      34.7  -1134.3      88.1
+          attn.qkv                28       35.3      1.26     1.08     1.44      30.3  -1206.8      73.4
+          attn.rope               28       19.0      0.68     0.62     0.68      16.3     66.1      66.1
+          attn.kv_append          28        7.8      0.28     0.26     0.30       6.7    -29.0      14.7
+          attn.sdpa               28       11.2      0.40     0.33     0.42       9.6     38.9      58.7
+          attn.o_proj             28       28.5      1.02     0.92     0.99      24.5    117.4      58.7
+        mlp                       28      219.0      7.82     7.41     7.77      65.2   1225.9      58.7
+      norm                         1        0.3      0.26     0.26     0.26       0.1     -4.2       2.1
+      lm_head                      1        2.9      2.94     2.94     2.94       0.9    -49.9       0.8
+    sample                         1        0.3      0.26     0.26     0.26       0.1     -0.4       0.0
+  decode.step                    127     5691.9     44.82    44.68    46.80      94.3      9.6       0.0
+    forward                      127     5634.5     44.37    44.22    46.32      99.0   -137.4     133.2
+      mask                       127        0.1      0.00     0.00     0.00       0.0      0.0       0.0
+      embed                      127       17.4      0.14     0.14     0.15       0.3   -341.4      16.6
+      layer                     3556     5310.1      1.49     1.48     1.60      94.2     16.5       0.0
+        attn                    3556     3442.2      0.97     0.96     1.06      64.8      2.4      -0.1
+          attn.qkv              3556      655.3      0.18     0.18     0.20      19.0      0.2       0.0
+          attn.rope             3556      445.3      0.13     0.12     0.14      12.9      0.4       0.0
+          attn.kv_append        3556      434.3      0.12     0.12     0.13      12.6      0.3       0.0
+          attn.sdpa             3556      486.7      0.14     0.13     0.15      14.1      0.5       0.0
+          attn.o_proj           3556      505.3      0.14     0.14     0.15      14.7      0.4       0.0
+        mlp                     3556     1837.0      0.52     0.51     0.57      34.6     14.7       0.1
+      norm                       127       15.5      0.12     0.12     0.13       0.3      0.0       0.0
+      lm_head                    127      261.2      2.06     2.04     2.16       4.6     54.1      66.6
+    sample                       127       56.4      0.44     0.44     0.51       1.0    147.0       0.0
+  detokenize                       1        0.0      0.04     0.04     0.04       0.0      0.0         -
