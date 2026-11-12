@@ -279,6 +279,8 @@ pub struct GenerationReport {
     pub peak_memory_bytes: u64,
     /// The generated text of each row, in the order of the prompts.
     pub texts: Vec<String>,
+    /// The generated token ids of each row, in the order of the prompts.
+    pub tokens: Vec<Vec<u32>>,
     /// The time of each batched decode step.
     pub decode_token_ms: Vec<f64>,
     /// The blocks of the paged cache at the end of the run, or `None` for
@@ -647,6 +649,7 @@ impl Engine {
             time_to_first_token_ms: first_token.as_secs_f64() * 1e3,
             peak_memory_bytes: peak_memory_bytes(),
             texts,
+            tokens: generated,
             decode_token_ms,
             kv_blocks: self.model.kv_block_usage(),
             shared_prefix_tokens: prefix,
@@ -843,6 +846,7 @@ impl Engine {
             time_to_first_token_ms: first_token.as_secs_f64() * 1e3,
             peak_memory_bytes: peak_memory_bytes(),
             texts: vec![text],
+            tokens: vec![generated],
             decode_token_ms,
             kv_blocks: None,
             shared_prefix_tokens: 0,
