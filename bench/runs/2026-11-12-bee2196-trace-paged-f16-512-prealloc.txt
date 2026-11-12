@@ -1,0 +1,62 @@
+# bee2196 2026-11-12: fornace --dtype f16 --kv-cache prealloc --attention fused --ignore-eos --max-new-tokens 128 --prompt alice-512.txt --trace summary --trace-filter fornace_engine=debug
+ book, and looked at it; but she did not
+see anything of value in it.
+
+She was very tired now, and her head was sore from the long walk,
+and she had to rest a little. She took off her coat, and put it on the
+ground near her feet, and then went up to the top of the well, and
+looked down at the bottom of the well; but there was nothing there.
+
+She looked again, and saw that the well was very deep, and she had to
+rest a little more. She took off her coat again, and put it on the ground,
+and then
+
+batch:                1
+prompt tokens:        512 per sequence
+generated tokens:     128 per sequence
+prefill tokens/s:     2593.4 total
+decode tokens/s:      34.1 total, 34.1 per sequence
+decode ms per step:   29.30
+time to first token:  197.4 ms
+peak memory:          1190.5 MB
+
+Trace summary. The report above includes the GPU waits of --trace.
+span                           count   total ms   mean ms   p50 ms   p95 ms  % parent  Δmem MB  metal MB
+load                               1      264.8    264.82   264.82   264.82         -   1151.1         -
+  load.config                      1        0.3      0.29     0.29     0.29       0.1      0.0         -
+  load.tokenizer                   1      102.7    102.67   102.67   102.67      38.8     52.2         -
+  load.weights                     1        0.3      0.30     0.30     0.30       0.1      0.3       0.0
+  load.model                       1      135.6    135.56   135.56   135.56      51.2   1096.1     992.2
+tokenize                           1        0.8      0.84     0.84     0.84         -      0.4         -
+generate                           1     3918.3   3918.26  3918.26  3918.26         -     18.0      12.8
+  prefill                          1      196.6    196.56   196.56   196.56       5.0      9.1      13.9
+    forward                        1      196.2    196.23   196.23   196.23      99.8      9.5      13.9
+      mask                         1        0.0      0.00     0.00     0.00       0.0      0.0       0.0
+      embed                        1        1.1      1.15     1.15     1.15       0.6    -11.3       1.0
+      layer                       24      192.2      8.01     7.75     8.21      98.0     46.8      12.8
+        attn                      24       86.9      3.62     3.30     3.76      45.2   -478.9      37.7
+          attn.qkv                24       22.8      0.95     0.81     1.15      26.3   -420.3      31.5
+          attn.rope               24       15.1      0.63     0.61     0.74      17.4     28.4      28.3
+          attn.kv_append          24        7.4      0.31     0.29     0.41       8.5    -12.1       6.3
+          attn.sdpa               24        9.9      0.41     0.33     0.37      11.4     18.7      25.2
+          attn.o_proj             24       18.8      0.78     0.76     0.82      21.6     49.6      25.2
+        mlp                       24      104.9      4.37     4.30     4.81      54.6    525.7      25.4
+      norm                         1        0.3      0.25     0.25     0.25       0.1     -2.1       1.0
+      lm_head                      1        2.3      2.28     2.28     2.28       1.2    -24.0       0.5
+    sample                         1        0.3      0.33     0.33     0.33       0.2     -0.4       0.0
+  decode.step                    127     3721.2     29.30    28.98    31.04      95.0      8.8       0.0
+    forward                      127     3663.4     28.85    28.52    30.64      98.4   -138.1     133.2
+      mask                       127        0.1      0.00     0.00     0.00       0.0      0.0       0.0
+      embed                      127       16.5      0.13     0.12     0.18       0.5   -342.7      16.6
+      layer                     3048     3440.3      1.13     1.10     1.33      93.9     10.9       0.0
+        attn                    3048     2558.2      0.84     0.81     1.02      74.4      3.8       0.0
+          attn.qkv              3048      468.7      0.15     0.15     0.21      18.3      0.7       0.0
+          attn.rope             3048      337.1      0.11     0.10     0.15      13.2      0.4       0.0
+          attn.kv_append        3048      329.7      0.11     0.10     0.14      12.9      0.6       0.0
+          attn.sdpa             3048      373.4      0.12     0.11     0.17      14.6      0.5       0.0
+          attn.o_proj           3048      356.0      0.12     0.11     0.15      13.9      0.6       0.0
+        mlp                     3048      861.4      0.28     0.27     0.38      25.0      7.0       0.0
+      norm                       127       14.2      0.11     0.10     0.18       0.4      0.0       0.0
+      lm_head                    127      164.1      1.29     1.27     1.40       4.5     60.3      66.6
+    sample                       127       57.0      0.45     0.43     0.57       1.5    147.0       0.0
+  detokenize                       1        0.2      0.23     0.23     0.23       0.0      0.0         -

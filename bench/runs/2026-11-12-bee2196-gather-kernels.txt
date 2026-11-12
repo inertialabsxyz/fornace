@@ -1,0 +1,7 @@
+# bee2196 2026-11-12: cargo test --release --features metal -p fornace-engine --test metal_gather_kernels -- --ignored --nocapture
+| dtype | positions | index_select, ms | index_select by block of 16, ms | strided copy, ms | element-wise, ms | scatter_set 1 position, ms |
+|---|---:|---:|---:|---:|---:|---:|
+| BF16 | 640 | 1.39 | 1.06 | 1.39 | 0.32 | 0.26 |
+| BF16 | 2176 | 3.88 | 3.01 | 4.17 | 0.39 | 0.26 |
+| F32 | 640 | 1.35 | 1.07 | 1.43 | 0.31 | 0.26 |
+| F32 | 2176 | 3.92 | 3.05 | 4.26 | 0.45 | 0.27 |

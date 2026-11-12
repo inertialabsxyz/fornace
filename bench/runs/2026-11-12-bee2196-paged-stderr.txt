@@ -1,0 +1,130 @@
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 prealloc batch 1 alice-512.txt run 1/3: 156.2 decode tok/s total, ttft 84.4 ms, shared prefix 0 tokens
+bf16 prealloc batch 1 alice-512.txt run 2/3: 158.3 decode tok/s total, ttft 89.1 ms, shared prefix 0 tokens
+bf16 prealloc batch 1 alice-512.txt run 3/3: 154.1 decode tok/s total, ttft 84.7 ms, shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 1 alice-512.txt run 1/3: 137.0 decode tok/s total, ttft 96.3 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-512.txt run 2/3: 139.4 decode tok/s total, ttft 95.3 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-512.txt run 3/3: 138.9 decode tok/s total, ttft 94.9 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 prealloc batch 1 alice-512.txt run 1/3: 214.6 decode tok/s total, ttft 93.3 ms, shared prefix 0 tokens
+q4 prealloc batch 1 alice-512.txt run 2/3: 285.7 decode tok/s total, ttft 104.6 ms, shared prefix 0 tokens
+q4 prealloc batch 1 alice-512.txt run 3/3: 278.8 decode tok/s total, ttft 90.9 ms, shared prefix 0 tokens
+q4 paged batch 1 alice-512.txt run 1/3: 225.0 decode tok/s total, ttft 103.8 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 1 alice-512.txt run 2/3: 229.3 decode tok/s total, ttft 98.5 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 1 alice-512.txt run 3/3: 228.2 decode tok/s total, ttft 97.6 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+Wrote 12 rows to bench/runs/2026-11-12-bee2196-paged.csv
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 prealloc batch 1 alice-2048.txt run 1/3: 153.6 decode tok/s total, ttft 332.1 ms, shared prefix 0 tokens
+bf16 prealloc batch 1 alice-2048.txt run 2/3: 151.0 decode tok/s total, ttft 331.7 ms, shared prefix 0 tokens
+bf16 prealloc batch 1 alice-2048.txt run 3/3: 148.0 decode tok/s total, ttft 352.3 ms, shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 1 alice-2048.txt run 1/3: 97.3 decode tok/s total, ttft 389.1 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-2048.txt run 2/3: 101.8 decode tok/s total, ttft 374.2 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-2048.txt run 3/3: 99.6 decode tok/s total, ttft 369.2 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+q4 prealloc batch 1 alice-2048.txt run 1/3: 258.8 decode tok/s total, ttft 375.3 ms, shared prefix 0 tokens
+q4 prealloc batch 1 alice-2048.txt run 2/3: 258.5 decode tok/s total, ttft 375.6 ms, shared prefix 0 tokens
+q4 prealloc batch 1 alice-2048.txt run 3/3: 259.7 decode tok/s total, ttft 361.9 ms, shared prefix 0 tokens
+q4 paged batch 1 alice-2048.txt run 1/3: 139.2 decode tok/s total, ttft 404.4 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 1 alice-2048.txt run 2/3: 138.2 decode tok/s total, ttft 406.4 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 1 alice-2048.txt run 3/3: 138.6 decode tok/s total, ttft 422.9 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+Wrote 12 rows to bench/runs/2026-11-12-bee2196-paged.csv
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 prealloc batch 1 alice-512.txt run 1/3: 159.1 decode tok/s total, ttft 84.6 ms, shared prefix 0 tokens
+bf16 prealloc batch 1 alice-512.txt run 2/3: 159.1 decode tok/s total, ttft 84.6 ms, shared prefix 0 tokens
+bf16 prealloc batch 1 alice-512.txt run 3/3: 159.4 decode tok/s total, ttft 85.4 ms, shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 prealloc batch 4 alice-512.txt run 1/3: 254.6 decode tok/s total, ttft 330.2 ms, shared prefix 0 tokens
+bf16 prealloc batch 4 alice-512.txt run 2/3: 253.8 decode tok/s total, ttft 335.0 ms, shared prefix 0 tokens
+bf16 prealloc batch 4 alice-512.txt run 3/3: 254.9 decode tok/s total, ttft 317.2 ms, shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 prealloc batch 4 alice-512.txt run 1/3: 255.4 decode tok/s total, ttft 89.7 ms, shared prefix 513 tokens
+bf16 prealloc batch 4 alice-512.txt run 2/3: 255.5 decode tok/s total, ttft 90.4 ms, shared prefix 513 tokens
+bf16 prealloc batch 4 alice-512.txt run 3/3: 255.0 decode tok/s total, ttft 90.2 ms, shared prefix 513 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 1 alice-512.txt run 1/3: 139.7 decode tok/s total, ttft 93.8 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-512.txt run 2/3: 139.1 decode tok/s total, ttft 93.9 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-512.txt run 3/3: 139.9 decode tok/s total, ttft 93.9 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 4 alice-512.txt run 1/3: 160.5 decode tok/s total, ttft 363.3 ms, kv blocks 160 of 164 in use (16 positions each, 2560 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 4 alice-512.txt run 2/3: 160.4 decode tok/s total, ttft 366.6 ms, kv blocks 160 of 164 in use (16 positions each, 2560 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 4 alice-512.txt run 3/3: 158.7 decode tok/s total, ttft 365.0 ms, kv blocks 160 of 164 in use (16 positions each, 2560 stored, 0.00 % empty), shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 4 alice-512.txt run 1/3: 154.4 decode tok/s total, ttft 94.8 ms, kv blocks 64 of 68 in use (16 positions each, 1024 stored, 0.00 % empty), shared prefix 513 tokens
+bf16 paged batch 4 alice-512.txt run 2/3: 156.5 decode tok/s total, ttft 97.8 ms, kv blocks 64 of 68 in use (16 positions each, 1024 stored, 0.00 % empty), shared prefix 513 tokens
+bf16 paged batch 4 alice-512.txt run 3/3: 160.2 decode tok/s total, ttft 95.3 ms, kv blocks 64 of 68 in use (16 positions each, 1024 stored, 0.00 % empty), shared prefix 513 tokens
+q4 prealloc batch 1 alice-512.txt run 1/3: 284.7 decode tok/s total, ttft 88.5 ms, shared prefix 0 tokens
+q4 prealloc batch 1 alice-512.txt run 2/3: 284.0 decode tok/s total, ttft 88.9 ms, shared prefix 0 tokens
+q4 prealloc batch 1 alice-512.txt run 3/3: 283.3 decode tok/s total, ttft 88.7 ms, shared prefix 0 tokens
+q4 prealloc batch 4 alice-512.txt run 1/3: 371.7 decode tok/s total, ttft 355.3 ms, shared prefix 0 tokens
+q4 prealloc batch 4 alice-512.txt run 2/3: 371.3 decode tok/s total, ttft 355.1 ms, shared prefix 0 tokens
+q4 prealloc batch 4 alice-512.txt run 3/3: 369.3 decode tok/s total, ttft 355.7 ms, shared prefix 0 tokens
+q4 prealloc batch 4 alice-512.txt run 1/3: 369.1 decode tok/s total, ttft 94.9 ms, shared prefix 513 tokens
+q4 prealloc batch 4 alice-512.txt run 2/3: 368.2 decode tok/s total, ttft 93.1 ms, shared prefix 513 tokens
+q4 prealloc batch 4 alice-512.txt run 3/3: 364.7 decode tok/s total, ttft 93.8 ms, shared prefix 513 tokens
+q4 paged batch 1 alice-512.txt run 1/3: 228.1 decode tok/s total, ttft 97.0 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 1 alice-512.txt run 2/3: 228.6 decode tok/s total, ttft 97.4 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 1 alice-512.txt run 3/3: 230.4 decode tok/s total, ttft 96.4 ms, kv blocks 40 of 41 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 4 alice-512.txt run 1/3: 199.1 decode tok/s total, ttft 398.9 ms, kv blocks 160 of 164 in use (16 positions each, 2560 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 4 alice-512.txt run 2/3: 199.0 decode tok/s total, ttft 394.5 ms, kv blocks 160 of 164 in use (16 positions each, 2560 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 4 alice-512.txt run 3/3: 198.0 decode tok/s total, ttft 400.9 ms, kv blocks 160 of 164 in use (16 positions each, 2560 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 4 alice-512.txt run 1/3: 191.3 decode tok/s total, ttft 99.5 ms, kv blocks 64 of 68 in use (16 positions each, 1024 stored, 0.00 % empty), shared prefix 513 tokens
+q4 paged batch 4 alice-512.txt run 2/3: 192.9 decode tok/s total, ttft 103.8 ms, kv blocks 64 of 68 in use (16 positions each, 1024 stored, 0.00 % empty), shared prefix 513 tokens
+q4 paged batch 4 alice-512.txt run 3/3: 192.3 decode tok/s total, ttft 105.7 ms, kv blocks 64 of 68 in use (16 positions each, 1024 stored, 0.00 % empty), shared prefix 513 tokens
+Wrote 36 rows to bench/runs/2026-11-12-bee2196-paged.csv
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 prealloc batch 1 alice-512.txt run 1/3: 151.7 decode tok/s total, ttft 90.0 ms, shared prefix 0 tokens
+bf16 prealloc batch 1 alice-512.txt run 2/3: 150.9 decode tok/s total, ttft 88.5 ms, shared prefix 0 tokens
+bf16 prealloc batch 1 alice-512.txt run 3/3: 150.9 decode tok/s total, ttft 88.2 ms, shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 1 alice-512.txt run 1/3: 133.9 decode tok/s total, ttft 100.9 ms, kv blocks 40 of 2048 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-512.txt run 2/3: 134.0 decode tok/s total, ttft 99.4 ms, kv blocks 40 of 2048 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-512.txt run 3/3: 134.1 decode tok/s total, ttft 102.3 ms, kv blocks 40 of 2048 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 prealloc batch 1 alice-512.txt run 1/3: 275.8 decode tok/s total, ttft 95.2 ms, shared prefix 0 tokens
+q4 prealloc batch 1 alice-512.txt run 2/3: 276.8 decode tok/s total, ttft 95.9 ms, shared prefix 0 tokens
+q4 prealloc batch 1 alice-512.txt run 3/3: 275.7 decode tok/s total, ttft 94.8 ms, shared prefix 0 tokens
+q4 paged batch 1 alice-512.txt run 1/3: 223.1 decode tok/s total, ttft 107.1 ms, kv blocks 40 of 2048 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 1 alice-512.txt run 2/3: 221.9 decode tok/s total, ttft 107.6 ms, kv blocks 40 of 2048 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 1 alice-512.txt run 3/3: 221.5 decode tok/s total, ttft 106.9 ms, kv blocks 40 of 2048 in use (16 positions each, 640 stored, 0.00 % empty), shared prefix 0 tokens
+Wrote 12 rows to bench/runs/2026-11-12-bee2196-paged.csv
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 1 alice-2048.txt run 1/3: 97.1 decode tok/s total, ttft 404.8 ms, kv blocks 272 of 273 in use (8 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-2048.txt run 2/3: 96.7 decode tok/s total, ttft 400.6 ms, kv blocks 272 of 273 in use (8 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-2048.txt run 3/3: 97.0 decode tok/s total, ttft 404.3 ms, kv blocks 272 of 273 in use (8 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 1 alice-2048.txt run 1/3: 96.5 decode tok/s total, ttft 406.3 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-2048.txt run 2/3: 96.8 decode tok/s total, ttft 400.2 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-2048.txt run 3/3: 96.9 decode tok/s total, ttft 404.0 ms, kv blocks 136 of 137 in use (16 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 1 alice-2048.txt run 1/3: 96.7 decode tok/s total, ttft 403.6 ms, kv blocks 34 of 35 in use (64 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-2048.txt run 2/3: 96.3 decode tok/s total, ttft 402.4 ms, kv blocks 34 of 35 in use (64 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 1 alice-2048.txt run 3/3: 96.7 decode tok/s total, ttft 398.5 ms, kv blocks 34 of 35 in use (64 positions each, 2176 stored, 0.00 % empty), shared prefix 0 tokens
+Wrote 9 rows to bench/runs/2026-11-12-bee2196-paged.csv
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 prealloc batch 4 alice-512.txt run 1/3: 244.6 decode tok/s total, ttft 373.7 ms, shared prefix 0 tokens
+bf16 prealloc batch 4 alice-512.txt run 2/3: 245.0 decode tok/s total, ttft 375.5 ms, shared prefix 0 tokens
+bf16 prealloc batch 4 alice-512.txt run 3/3: 244.9 decode tok/s total, ttft 374.2 ms, shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 prealloc batch 4 alice-512.txt run 1/3: 244.6 decode tok/s total, ttft 137.4 ms, shared prefix 513 tokens
+bf16 prealloc batch 4 alice-512.txt run 2/3: 244.4 decode tok/s total, ttft 137.1 ms, shared prefix 513 tokens
+bf16 prealloc batch 4 alice-512.txt run 3/3: 244.3 decode tok/s total, ttft 138.0 ms, shared prefix 513 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 4 alice-512.txt run 1/3: 147.8 decode tok/s total, ttft 434.2 ms, kv blocks 176 of 180 in use (16 positions each, 2816 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 4 alice-512.txt run 2/3: 147.6 decode tok/s total, ttft 438.1 ms, kv blocks 176 of 180 in use (16 positions each, 2816 stored, 0.00 % empty), shared prefix 0 tokens
+bf16 paged batch 4 alice-512.txt run 3/3: 147.5 decode tok/s total, ttft 437.8 ms, kv blocks 176 of 180 in use (16 positions each, 2816 stored, 0.00 % empty), shared prefix 0 tokens
+warning: requested dtype f16, but the engine uses bf16. The rows say bf16.
+bf16 paged batch 4 alice-512.txt run 1/3: 147.7 decode tok/s total, ttft 156.0 ms, kv blocks 80 of 84 in use (16 positions each, 1280 stored, 0.00 % empty), shared prefix 513 tokens
+bf16 paged batch 4 alice-512.txt run 2/3: 147.6 decode tok/s total, ttft 156.1 ms, kv blocks 80 of 84 in use (16 positions each, 1280 stored, 0.00 % empty), shared prefix 513 tokens
+bf16 paged batch 4 alice-512.txt run 3/3: 147.5 decode tok/s total, ttft 156.5 ms, kv blocks 80 of 84 in use (16 positions each, 1280 stored, 0.00 % empty), shared prefix 513 tokens
+q4 prealloc batch 4 alice-512.txt run 1/3: 361.1 decode tok/s total, ttft 417.4 ms, shared prefix 0 tokens
+q4 prealloc batch 4 alice-512.txt run 2/3: 358.0 decode tok/s total, ttft 419.1 ms, shared prefix 0 tokens
+q4 prealloc batch 4 alice-512.txt run 3/3: 360.9 decode tok/s total, ttft 417.9 ms, shared prefix 0 tokens
+q4 prealloc batch 4 alice-512.txt run 1/3: 359.2 decode tok/s total, ttft 144.3 ms, shared prefix 513 tokens
+q4 prealloc batch 4 alice-512.txt run 2/3: 359.2 decode tok/s total, ttft 145.3 ms, shared prefix 513 tokens
+q4 prealloc batch 4 alice-512.txt run 3/3: 359.6 decode tok/s total, ttft 145.5 ms, shared prefix 513 tokens
+q4 paged batch 4 alice-512.txt run 1/3: 182.6 decode tok/s total, ttft 485.0 ms, kv blocks 176 of 180 in use (16 positions each, 2816 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 4 alice-512.txt run 2/3: 182.6 decode tok/s total, ttft 482.9 ms, kv blocks 176 of 180 in use (16 positions each, 2816 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 4 alice-512.txt run 3/3: 182.8 decode tok/s total, ttft 484.4 ms, kv blocks 176 of 180 in use (16 positions each, 2816 stored, 0.00 % empty), shared prefix 0 tokens
+q4 paged batch 4 alice-512.txt run 1/3: 182.1 decode tok/s total, ttft 163.4 ms, kv blocks 80 of 84 in use (16 positions each, 1280 stored, 0.00 % empty), shared prefix 513 tokens
+q4 paged batch 4 alice-512.txt run 2/3: 182.3 decode tok/s total, ttft 164.3 ms, kv blocks 80 of 84 in use (16 positions each, 1280 stored, 0.00 % empty), shared prefix 513 tokens
+q4 paged batch 4 alice-512.txt run 3/3: 182.1 decode tok/s total, ttft 165.1 ms, kv blocks 80 of 84 in use (16 positions each, 1280 stored, 0.00 % empty), shared prefix 513 tokens
+Wrote 24 rows to bench/runs/2026-11-12-bee2196-paged.csv
