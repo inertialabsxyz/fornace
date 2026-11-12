@@ -414,6 +414,7 @@ fn engine_shared_prefix_rows_equal_generate_on_the_cpu() {
             attention: AttentionKind::Naive,
             sync_spans: false,
             ignore_eos: true,
+            draft: None,
         })
         .unwrap()
     };

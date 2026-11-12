@@ -358,6 +358,7 @@ fn a_quantized_batch_gives_the_text_of_batch_one() {
             attention: AttentionKind::Fused,
             sync_spans: false,
             ignore_eos: true,
+            draft: None,
         })
         .unwrap();
         let prompts = [

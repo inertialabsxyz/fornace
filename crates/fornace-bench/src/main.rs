@@ -328,6 +328,7 @@ fn worker(args: &Args) -> Result<()> {
         attention: args.attention,
         sync_spans: false,
         ignore_eos: args.ignore_eos,
+        draft: None,
     };
     let mut engine = Engine::load(&config)?;
     let dtype = engine.effective_dtype();
@@ -678,6 +679,7 @@ mod tests {
             attention: AttentionKind::Fused,
             sync_spans: false,
             ignore_eos: true,
+            draft: None,
         }
     }
 

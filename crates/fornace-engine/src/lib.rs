@@ -15,7 +15,7 @@ mod sampler;
 mod trace;
 
 use std::panic::Location;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 use std::{fmt, time::Instant};
@@ -82,6 +82,16 @@ pub enum Error {
     ZeroBlockSize,
     #[error("perplexity needs at least 2 tokens, the text has {0}")]
     TextTooShort(usize),
+    #[error("--spec-k must be at least 1")]
+    ZeroSpecK,
+    #[error("--draft-model needs --batch 1, not {0}")]
+    DraftNeedsBatchOne(usize),
+    #[error("--draft-model needs --kv-cache prealloc, not {0}")]
+    DraftNeedsPrealloc(KvCacheKind),
+    #[error("the --draft-model vocabulary has {draft} tokens, the target has {target}")]
+    DraftVocabMismatch { target: usize, draft: usize },
+    #[error("the --draft-model tokenizer gives other token ids than the target tokenizer")]
+    DraftTokenizerMismatch,
     #[error("candle")]
     Candle(#[from] candle_core::Error),
 }
@@ -199,6 +209,49 @@ pub struct LoadConfig {
     /// Do not stop at the end-of-sequence token. Each generation then
     /// decodes exactly `max_new_tokens` tokens, so runs are comparable.
     pub ignore_eos: bool,
+    /// A draft model for speculative decoding, or `None` for plain decode.
+    pub draft: Option<DraftConfig>,
+}
+
+/// The draft model of speculative decoding. It guesses `k` tokens, and the
+/// model of `LoadConfig::model_dir` (the target) checks them in one forward
+/// pass. The draft must have the tokenizer of the target. It needs batch 1
+/// and the `Prealloc` cache.
+#[derive(Debug, Clone)]
+pub struct DraftConfig {
+    pub model_dir: PathBuf,
+    pub dtype: Dtype,
+    /// The guesses in each round. At least 1.
+    pub k: usize,
+}
+
+/// The counts and times of speculative decoding in one generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpecReport {
+    /// The guesses in each round.
+    pub k: usize,
+    pub rounds: usize,
+    /// The guesses that the target accepted, in all rounds.
+    pub accepted: usize,
+    /// The guesses that the target checked, in all rounds. A round with a
+    /// reject after j accepts checks j + 1 guesses. A round with no reject
+    /// checks k.
+    pub tested: usize,
+    /// The total time of the draft steps, in milliseconds.
+    pub draft_ms: f64,
+    /// The total time of the verify passes, in milliseconds.
+    pub verify_ms: f64,
+}
+
+impl SpecReport {
+    /// The acceptance rate α: `accepted` / `tested`. 0 if nothing was
+    /// tested.
+    pub fn alpha(&self) -> f64 {
+        if self.tested == 0 {
+            return 0.0;
+        }
+        self.accepted as f64 / self.tested as f64
+    }
 }
 
 /// The result of one batch from [`Engine::generate_batch`], with its
@@ -233,6 +286,9 @@ pub struct GenerationReport {
     /// The prompt tokens that were prefilled once for all rows. 0 if the
     /// rows did not share a prefix.
     pub shared_prefix_tokens: usize,
+    /// The counts and times of speculative decoding, or `None` without a
+    /// draft.
+    pub speculative: Option<SpecReport>,
 }
 
 /// A loaded model that generates text.
@@ -242,6 +298,9 @@ pub struct Engine {
     tokenizer: Tokenizer,
     device: Device,
     weights: Dtype,
+    /// The draft model and the format of its weights, if
+    /// `LoadConfig::draft` is set.
+    draft: Option<(ModelForCausalLM, Dtype)>,
     load_config: LoadConfig,
     /// The wall time of [`Engine::load`], in milliseconds.
     pub load_ms: f64,
@@ -260,18 +319,21 @@ impl Engine {
         if load_config.attention == AttentionKind::Fused && load_config.device == DeviceKind::Cpu {
             return Err(Error::FusedAttentionNeedsMetal);
         }
+        if let Some(draft) = &load_config.draft {
+            if draft.k == 0 {
+                return Err(Error::ZeroSpecK);
+            }
+            if load_config.batch != 1 {
+                return Err(Error::DraftNeedsBatchOne(load_config.batch));
+            }
+            if load_config.kv_cache != KvCacheKind::Prealloc {
+                return Err(Error::DraftNeedsPrealloc(load_config.kv_cache));
+            }
+        }
         // Without the `metal` feature, new_metal returns an error.
         let device = match load_config.device {
             DeviceKind::Cpu => Device::Cpu,
             DeviceKind::Metal => Device::new_metal(0)?,
-        };
-        let path = load_config.model_dir.join("config.json");
-        // config.json gives the shape of the model: 24 layers, hidden 896,
-        // attention heads, vocab size. This line also needs the serde_json crate.
-        let config: Config = {
-            let _span = tracing::info_span!("load.config").entered();
-            let bytes = std::fs::read(&path).map_err(|source| Error::Read { path, source })?;
-            serde_json::from_slice(&bytes)?
         };
         // The tokenizer turns text into token ids, and ids back into text.
         let tokenizer = {
@@ -279,63 +341,52 @@ impl Engine {
             Tokenizer::from_file(load_config.model_dir.join("tokenizer.json"))
                 .map_err(Error::Tokenizer)?
         };
-        let (mut model, weights) =
-            match quantize::gguf_path(&load_config.model_dir, load_config.dtype) {
-                // Q8 and Q4: the GGUF file from `fornace-quantize`. It is read
-                // into memory, so the load takes longer than an mmap.
-                Some(path) => {
-                    if !path.exists() {
-                        return Err(Error::QuantizedWeightsMissing {
-                            path,
-                            dtype: load_config.dtype,
-                        });
-                    }
-                    let vb = {
-                        let _span = device_span!(&device, sync, "load.weights")?;
-                        QVarBuilder::from_gguf(&path, &device)?
-                    };
-                    let _span = device_span!(&device, sync, "load.model")?;
-                    let model = ModelForCausalLM::new_quantized(&config, vb, sync)?;
-                    (model, load_config.dtype)
+        let (model, config, weights) = load_model(
+            &load_config.model_dir,
+            load_config.dtype,
+            load_config.attention,
+            &device,
+            sync,
+        )?;
+        // The draft uses the device of the target, so both models share one
+        // command queue.
+        let draft = match &load_config.draft {
+            None => None,
+            Some(draft) => {
+                let _span = tracing::info_span!("load.draft").entered();
+                let draft_tokenizer = Tokenizer::from_file(draft.model_dir.join("tokenizer.json"))
+                    .map_err(Error::Tokenizer)?;
+                let encode = |t: &Tokenizer| -> Result<Vec<u32>> {
+                    t.encode(TOKENIZER_CHECK, false)
+                        .map(|ids| ids.get_ids().to_vec())
+                        .map_err(Error::TokenEncoding)
+                };
+                if encode(&tokenizer)? != encode(&draft_tokenizer)? {
+                    return Err(Error::DraftTokenizerMismatch);
                 }
-                None => {
-                    let dtype = match load_config.dtype {
-                        Dtype::F32 => DType::F32,
-                        Dtype::Bf16 => DType::BF16,
-                        // Candle's CPU backend has no BF16 matmul, so the CPU
-                        // computes in F32.
-                        _ if device.is_cpu() => DType::F32,
-                        _ => DType::BF16,
-                    };
-                    // One ~1 GB safetensors file that holds every weight tensor, by name.
-                    let weights = load_config.model_dir.join("model.safetensors");
-                    // VarBuilder maps the file into memory (mmap) and gives each layer its
-                    // tensors by name, as `dtype` on the device. No full read happens here,
-                    // so the load takes milliseconds. It is unsafe because mmap trusts
-                    // that the file does not change while it is mapped.
-                    let vb = {
-                        let _span = device_span!(&device, sync, "load.weights")?;
-                        unsafe { VarBuilder::from_mmaped_safetensors(&[weights], dtype, &device)? }
-                    };
-                    // model.rs (a copy of Candle's Qwen2) builds the embedding, the 24
-                    // layers and the output head from those tensors.
-                    let _span = device_span!(&device, sync, "load.model")?;
-                    let model = ModelForCausalLM::new(&config, vb, sync)?;
-                    let weights = if dtype == DType::BF16 {
-                        Dtype::Bf16
-                    } else {
-                        Dtype::F32
-                    };
-                    (model, weights)
+                let (model, draft_config, weights) = load_model(
+                    &draft.model_dir,
+                    draft.dtype,
+                    load_config.attention,
+                    &device,
+                    sync,
+                )?;
+                if draft_config.vocab_size != config.vocab_size {
+                    return Err(Error::DraftVocabMismatch {
+                        target: config.vocab_size,
+                        draft: draft_config.vocab_size,
+                    });
                 }
-            };
-        model.set_attention(load_config.attention);
+                Some((model, weights))
+            }
+        };
 
         Ok(Engine {
             model,
             tokenizer,
             device,
             weights,
+            draft,
             load_config: load_config.clone(),
             load_ms: start.elapsed().as_secs_f64() * 1e3,
         })
@@ -346,6 +397,12 @@ impl Engine {
     /// the compute dtype of the device, BF16 on Metal and F32 on the CPU.
     pub fn effective_dtype(&self) -> Dtype {
         self.weights
+    }
+
+    /// The format of the loaded draft weights, as in
+    /// [`Engine::effective_dtype`], or `None` without a draft.
+    pub fn draft_effective_dtype(&self) -> Option<Dtype> {
+        self.draft.as_ref().map(|(_, weights)| *weights)
     }
 
     /// The perplexity of the model on `text`: exp of the mean negative
@@ -427,6 +484,13 @@ impl Engine {
             return Err(Error::EmptyBatch);
         }
         let batch = rows.len();
+        if self.draft.is_some() {
+            if batch != 1 {
+                return Err(Error::DraftNeedsBatchOne(batch));
+            }
+            // The speculative decode loop is step 4 of the brief.
+            return Err(Error::not_implemented());
+        }
         let sync = self.load_config.sync_spans;
         let _generate = device_span!(&self.device, sync, "generate", batch)?;
         let prompt_tokens = rows[0].len();
@@ -594,6 +658,7 @@ impl Engine {
             decode_token_ms,
             kv_blocks: self.model.kv_block_usage(),
             shared_prefix_tokens: prefix,
+            speculative: None,
         })
     }
 
@@ -613,6 +678,80 @@ impl Engine {
             kind => self.model.reset_kv_cache(kind, capacity),
         }
     }
+}
+
+/// A text with words, numbers, code, and other scripts. Two tokenizers
+/// that give it the same ids are taken as the same tokenizer.
+const TOKENIZER_CHECK: &str =
+    "The draft guesses, the target checks: 0123456789, `fn main() {}`, ünïcødé, 中文, Ελληνικά.";
+
+/// Loads the model in `model_dir` with `dtype` weights on `device`. Returns
+/// the model, its config, and the format of the loaded weights: `Q8`, `Q4`,
+/// `Bf16`, or `F32`.
+fn load_model(
+    model_dir: &Path,
+    dtype: Dtype,
+    attention: AttentionKind,
+    device: &Device,
+    sync: bool,
+) -> Result<(ModelForCausalLM, Config, Dtype)> {
+    let path = model_dir.join("config.json");
+    // config.json gives the shape of the model: 24 layers, hidden 896,
+    // attention heads, vocab size. This line also needs the serde_json crate.
+    let config: Config = {
+        let _span = tracing::info_span!("load.config").entered();
+        let bytes = std::fs::read(&path).map_err(|source| Error::Read { path, source })?;
+        serde_json::from_slice(&bytes)?
+    };
+    let (mut model, weights) = match quantize::gguf_path(model_dir, dtype) {
+        // Q8 and Q4: the GGUF file from `fornace-quantize`. It is read into
+        // memory, so the load takes longer than an mmap.
+        Some(path) => {
+            if !path.exists() {
+                return Err(Error::QuantizedWeightsMissing { path, dtype });
+            }
+            let vb = {
+                let _span = device_span!(device, sync, "load.weights")?;
+                QVarBuilder::from_gguf(&path, device)?
+            };
+            let _span = device_span!(device, sync, "load.model")?;
+            let model = ModelForCausalLM::new_quantized(&config, vb, sync)?;
+            (model, dtype)
+        }
+        None => {
+            let compute = match dtype {
+                Dtype::F32 => DType::F32,
+                Dtype::Bf16 => DType::BF16,
+                // Candle's CPU backend has no BF16 matmul, so the CPU computes
+                // in F32.
+                _ if device.is_cpu() => DType::F32,
+                _ => DType::BF16,
+            };
+            // One safetensors file that holds every weight tensor, by name.
+            let weights = model_dir.join("model.safetensors");
+            // VarBuilder maps the file into memory (mmap) and gives each layer
+            // its tensors by name, as `compute` on the device. No full read
+            // happens here, so the load takes milliseconds. It is unsafe
+            // because mmap trusts that the file does not change while it is
+            // mapped.
+            let vb = {
+                let _span = device_span!(device, sync, "load.weights")?;
+                unsafe { VarBuilder::from_mmaped_safetensors(&[weights], compute, device)? }
+            };
+            // model.rs (a copy of Candle's Qwen2) builds the embedding, the
+            // layers and the output head from those tensors.
+            let _span = device_span!(device, sync, "load.model")?;
+            let model = ModelForCausalLM::new(&config, vb, sync)?;
+            let weights = if compute == DType::BF16 {
+                Dtype::Bf16
+            } else {
+                Dtype::F32
+            };
+            (model, weights)
+        }
+    };
+    model.set_attention(attention);
+    Ok((model, config, weights))
 }
 
 /// The number of tokens at the start that all rows have in common.
@@ -679,10 +818,74 @@ mod tests {
             attention: AttentionKind::Fused,
             sync_spans: false,
             ignore_eos: false,
+            draft: None,
         };
         assert!(matches!(
             Engine::load(&config),
             Err(Error::FusedAttentionNeedsMetal)
         ));
+    }
+
+    fn draft_config(k: usize, batch: usize, kv_cache: KvCacheKind) -> LoadConfig {
+        LoadConfig {
+            model_dir: PathBuf::from("does-not-exist"),
+            dtype: Dtype::F16,
+            device: DeviceKind::Cpu,
+            max_new_tokens: 1,
+            batch,
+            kv_cache,
+            block_size: DEFAULT_BLOCK_SIZE,
+            kv_capacity: None,
+            share_prefix: false,
+            attention: AttentionKind::Naive,
+            sync_spans: false,
+            ignore_eos: false,
+            draft: Some(DraftConfig {
+                model_dir: PathBuf::from("does-not-exist-either"),
+                dtype: Dtype::F16,
+                k,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_draft_needs_k_batch_one_and_prealloc_before_any_file_is_read() {
+        let load = |k, batch, kv| Engine::load(&draft_config(k, batch, kv));
+        assert!(matches!(
+            load(0, 1, KvCacheKind::Prealloc),
+            Err(Error::ZeroSpecK)
+        ));
+        assert!(matches!(
+            load(4, 2, KvCacheKind::Prealloc),
+            Err(Error::DraftNeedsBatchOne(2))
+        ));
+        assert!(matches!(
+            load(4, 1, KvCacheKind::Paged),
+            Err(Error::DraftNeedsPrealloc(KvCacheKind::Paged))
+        ));
+        // A valid draft config gets as far as the missing tokenizer.
+        assert!(matches!(
+            load(4, 1, KvCacheKind::Prealloc),
+            Err(Error::Tokenizer(_))
+        ));
+    }
+
+    #[test]
+    fn alpha_is_accepted_over_tested() {
+        let report = SpecReport {
+            k: 4,
+            rounds: 3,
+            accepted: 7,
+            tested: 9,
+            draft_ms: 0.0,
+            verify_ms: 0.0,
+        };
+        assert!((report.alpha() - 7.0 / 9.0).abs() < 1e-12);
+        let empty = SpecReport {
+            accepted: 0,
+            tested: 0,
+            ..report
+        };
+        assert_eq!(empty.alpha(), 0.0);
     }
 }

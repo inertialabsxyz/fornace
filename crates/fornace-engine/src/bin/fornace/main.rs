@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{ArgAction, Parser, ValueEnum};
 use fornace_engine::{
-    AttentionKind, DEFAULT_BLOCK_SIZE, DeviceKind, Dtype, Engine, KvCacheKind, LoadConfig,
+    AttentionKind, DEFAULT_BLOCK_SIZE, DeviceKind, DraftConfig, Dtype, Engine, KvCacheKind,
+    LoadConfig,
 };
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
@@ -76,6 +77,18 @@ struct Args {
     /// --max-new-tokens tokens.
     #[arg(long)]
     ignore_eos: bool,
+    /// A draft model for speculative decoding: the directory of a model
+    /// with the same tokenizer. It guesses --spec-k tokens, and --model
+    /// checks them in one forward pass. Needs --batch 1 and --kv-cache
+    /// prealloc.
+    #[arg(long, value_name = "DIR")]
+    draft_model: Option<PathBuf>,
+    /// The data type of the draft weights, as for --dtype.
+    #[arg(long, default_value = "f16", requires = "draft_model")]
+    draft_dtype: Dtype,
+    /// The guesses of the draft in each round.
+    #[arg(long, value_name = "N", default_value = "4", requires = "draft_model")]
+    spec_k: NonZeroUsize,
     /// Print the report as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -138,6 +151,11 @@ fn main() -> anyhow::Result<()> {
         attention: args.attention,
         sync_spans: args.trace.is_some() && args.trace_sync,
         ignore_eos: args.ignore_eos,
+        draft: args.draft_model.map(|model_dir| DraftConfig {
+            model_dir,
+            dtype: args.draft_dtype,
+            k: args.spec_k.get(),
+        }),
     };
     let mut engine = Engine::load(&config)?;
     let prompts = vec![args.prompt.as_str(); config.batch];
@@ -259,6 +277,23 @@ mod tests {
         assert_eq!(args.kv_capacity.map(NonZeroUsize::get), Some(32768));
         assert!(args.share_prefix);
         assert!(Args::try_parse_from(BASE.iter().chain(&["--block-size", "0"])).is_err());
+    }
+
+    #[test]
+    fn draft_flags_parse_and_need_a_draft_model() {
+        let args = Args::try_parse_from(BASE).unwrap();
+        assert_eq!(args.draft_model, None);
+        let flags = ["--draft-model", "d", "--draft-dtype", "q8", "--spec-k", "8"];
+        let args = Args::try_parse_from(BASE.iter().chain(&flags)).unwrap();
+        assert_eq!(args.draft_model, Some(PathBuf::from("d")));
+        assert_eq!(args.draft_dtype, Dtype::Q8);
+        assert_eq!(args.spec_k.get(), 8);
+        let args = Args::try_parse_from(BASE.iter().chain(&["--draft-model", "d"])).unwrap();
+        assert_eq!(args.spec_k.get(), 4);
+        assert!(Args::try_parse_from(BASE.iter().chain(&["--spec-k", "2"])).is_err());
+        assert!(Args::try_parse_from(BASE.iter().chain(&["--draft-dtype", "q4"])).is_err());
+        let zero = ["--draft-model", "d", "--spec-k", "0"];
+        assert!(Args::try_parse_from(BASE.iter().chain(&zero)).is_err());
     }
 
     #[test]

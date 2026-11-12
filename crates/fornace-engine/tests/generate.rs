@@ -25,6 +25,7 @@ fn greedy_decode_names_the_capital_of_spain() {
         attention: Default::default(),
         sync_spans: false,
         ignore_eos: false,
+        draft: None,
     };
     let mut engine = Engine::load(&config).expect("load the engine");
     let report = engine
@@ -75,6 +76,7 @@ fn generate_puts_each_new_token_at_its_position() {
         attention: AttentionKind::Naive,
         sync_spans: false,
         ignore_eos: true,
+        draft: None,
     })
     .expect("load the engine");
     let text = engine
