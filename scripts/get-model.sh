@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# Download Qwen/Qwen2.5-0.5B-Instruct (safetensors) into ./models/qwen2.5-0.5b-instruct.
+# Download a model (safetensors) from Hugging Face into ./models.
+#
+# Usage: scripts/get-model.sh [MODEL_ID] [DEST]
+#
+# The default is Qwen/Qwen2.5-0.5B-Instruct in ./models/qwen2.5-0.5b-instruct.
+# The draft and target pair for speculative decoding also needs the 1.5B:
+#
+#   scripts/get-model.sh Qwen/Qwen2.5-1.5B-Instruct ./models/qwen2.5-1.5b-instruct
+#
 # You must install the hf CLI first: pip install -U huggingface_hub
 set -euo pipefail
 
-MODEL="Qwen/Qwen2.5-0.5B-Instruct"
-DEST="./models/qwen2.5-0.5b-instruct"
+MODEL="${1:-Qwen/Qwen2.5-0.5B-Instruct}"
+DEST="${2:-./models/qwen2.5-0.5b-instruct}"
 
 if ! command -v hf >/dev/null 2>&1; then
     echo "error: the hf CLI is not installed." >&2

@@ -5,7 +5,15 @@ writes one CSV row for each run.
 
 ## How to run
 
-Download the model first with `scripts/get-model.sh`. Then run:
+Download the model first with `scripts/get-model.sh`. Speculative decoding
+also needs Qwen2.5-1.5B-Instruct as the target:
+
+```sh
+scripts/get-model.sh Qwen/Qwen2.5-1.5B-Instruct ./models/qwen2.5-1.5b-instruct
+make quantize MODEL=./models/qwen2.5-1.5b-instruct
+```
+
+Then run:
 
 ```sh
 cargo run --release -p fornace-bench -- \
