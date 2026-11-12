@@ -12,6 +12,7 @@ pub mod model;
 pub mod quality;
 pub mod quantize;
 mod sampler;
+pub mod spec;
 mod trace;
 
 use std::panic::Location;
@@ -32,7 +33,7 @@ pub use crate::cache::{BlockUsage, DEFAULT_BLOCK_SIZE, KvCacheKind};
 use crate::metrics::peak_memory_bytes;
 pub use crate::model::AttentionKind;
 use crate::model::{Config, ModelForCausalLM};
-use crate::trace::device_span;
+use crate::trace::{device_debug_span, device_span};
 
 /// The errors that the engine can return.
 #[derive(Debug, thiserror::Error)]
@@ -488,8 +489,7 @@ impl Engine {
             if batch != 1 {
                 return Err(Error::DraftNeedsBatchOne(batch));
             }
-            // The speculative decode loop is step 4 of the brief.
-            return Err(Error::not_implemented());
+            return self.generate_speculative(&rows[0], start);
         }
         let sync = self.load_config.sync_spans;
         let _generate = device_span!(&self.device, sync, "generate", batch)?;
@@ -604,15 +604,7 @@ impl Engine {
                     .iter_mut()
                     .zip(&generated)
                     .enumerate()
-                    .map(|(b, (sampler, row))| {
-                        let start = row.len().saturating_sub(64);
-                        let logits = candle_transformers::utils::apply_repeat_penalty(
-                            &logits.get(b)?,
-                            1.1,
-                            &row[start..],
-                        )?;
-                        sampler.sample(&logits)
-                    })
+                    .map(|(b, (sampler, row))| sample_with_penalty(sampler, &logits.get(b)?, row))
                     .collect::<candle_core::Result<Vec<u32>>>()?
             };
             decode_token_ms.push(step.elapsed().as_secs_f64() * 1e3);
@@ -662,6 +654,202 @@ impl Engine {
         })
     }
 
+    /// Generates with a draft model. Greedy, batch 1, `Prealloc` caches.
+    ///
+    /// At the start of each round, both caches hold the same n positions,
+    /// and the last accepted token is not in them yet. The draft guesses K
+    /// tokens, one step each. The target checks them in one forward pass of
+    /// K + 1 tokens. Then both caches keep only the accepted positions. With
+    /// greedy sampling, the text equals the text of the target alone.
+    fn generate_speculative(&mut self, prompt: &[u32], start: Instant) -> Result<GenerationReport> {
+        let sync = self.load_config.sync_spans;
+        let device = self.device.clone();
+        let _generate = device_span!(&device, sync, "generate", batch = 1)?;
+        let k = self
+            .load_config
+            .draft
+            .as_ref()
+            .expect("generate_speculative needs a draft")
+            .k;
+        let max_new_tokens = self.load_config.max_new_tokens;
+        let prompt_tokens = prompt.len();
+        let Some((draft, _)) = self.draft.as_mut() else {
+            unreachable!("generate_speculative needs a draft")
+        };
+        let target = &mut self.model;
+        // The verify pass writes K + 1 positions after the last token.
+        let capacity = prompt_tokens + max_new_tokens + k + 1;
+        target.reset_kv_cache(KvCacheKind::Prealloc, capacity);
+        draft.reset_kv_cache(KvCacheKind::Prealloc, capacity);
+        let eos: Vec<u32> = if self.load_config.ignore_eos {
+            Vec::new()
+        } else {
+            ["<|im_end|>", "<|endoftext|>"]
+                .iter()
+                .filter_map(|t| self.tokenizer.token_to_id(t))
+                .collect()
+        };
+        let mut sampler = LogitsProcessor::from_sampling(42, Sampling::ArgMax);
+        let mut draft_sampler = LogitsProcessor::from_sampling(42, Sampling::ArgMax);
+
+        // #2 Prefill both models. The time to first token includes the
+        // draft prefill, because the first round needs the draft cache.
+        let prefill = device_span!(&device, sync, "prefill", tokens = prompt_tokens)?;
+        let input = Tensor::new(prompt, &device)?.unsqueeze(0)?;
+        let logits = {
+            let _span = device_span!(&device, sync, "forward")?;
+            target
+                .forward(&input, 0)?
+                .squeeze(0)?
+                .squeeze(0)?
+                .to_dtype(DType::F32)?
+        };
+        {
+            let _span = device_span!(&device, sync, "spec.draft_prefill")?;
+            draft.hidden_states(&input, 0)?;
+        }
+        let first = {
+            let _span = device_span!(&device, sync, "sample")?;
+            sampler.sample(&logits)?
+        };
+        drop(prefill);
+        let first_token = start.elapsed();
+
+        let mut generated = vec![first];
+        let mut decode_token_ms = Vec::with_capacity(max_new_tokens);
+        let mut report = SpecReport {
+            k,
+            rounds: 0,
+            accepted: 0,
+            tested: 0,
+            draft_ms: 0.0,
+            verify_ms: 0.0,
+        };
+        // The positions in both caches. The prompt fills 0 to T - 1.
+        let mut n = prompt_tokens;
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        while generated.len() < max_new_tokens {
+            let round = Instant::now();
+            let _round = device_span!(&device, sync, "spec.round", pos = n)?;
+            let last = *generated.last().expect("the first token is in");
+
+            // 1. Draft K tokens, one step each. The draft cache then holds
+            // n + K positions: `last` and d₁ to d_{K-1}.
+            let step = Instant::now();
+            let mut drafts = Vec::with_capacity(k);
+            {
+                let _span = device_debug_span!(&device, sync, "spec.draft")?;
+                let mut context = generated.clone();
+                let mut token = last;
+                for i in 0..k {
+                    let input = Tensor::new(&[token], &device)?.unsqueeze(0)?;
+                    let logits = draft
+                        .forward(&input, n + i)?
+                        .squeeze(0)?
+                        .squeeze(0)?
+                        .to_dtype(DType::F32)?;
+                    token = sample_with_penalty(&mut draft_sampler, &logits, &context)?;
+                    drafts.push(token);
+                    context.push(token);
+                }
+            }
+            report.draft_ms += ms(step);
+
+            // 2. Verify: one target pass of [last, d₁, …, d_K] at n. Then the
+            // target's token after each position, with the penalty over the
+            // tokens before it, as the target alone would choose it.
+            let step = Instant::now();
+            let target_tokens = {
+                let _span = device_debug_span!(&device, sync, "spec.verify")?;
+                let mut seq = Vec::with_capacity(k + 1);
+                seq.push(last);
+                seq.extend(&drafts);
+                let input = Tensor::new(seq.as_slice(), &device)?.unsqueeze(0)?;
+                let hidden = target.hidden_states(&input, n)?.squeeze(0)?;
+                let logits = target.lm_head(&hidden)?.to_dtype(DType::F32)?;
+                let mut context = generated.clone();
+                let mut tokens = Vec::with_capacity(k + 1);
+                for (i, &guess) in drafts.iter().enumerate() {
+                    tokens.push(sample_with_penalty(
+                        &mut sampler,
+                        &logits.get(i)?,
+                        &context,
+                    )?);
+                    context.push(guess);
+                }
+                tokens.push(sample_with_penalty(
+                    &mut sampler,
+                    &logits.get(k)?,
+                    &context,
+                )?);
+                tokens
+            };
+            report.verify_ms += ms(step);
+
+            // 3. Accept.
+            let (j, next) = spec::accept_greedy(&drafts, &target_tokens);
+            report.rounds += 1;
+            report.accepted += j;
+            report.tested += spec::tested(j, k);
+
+            // 4. Rollback. Both caches keep `last` and d₁ to d_j. The target
+            // holds n + K + 1 positions. The draft holds n + K, so if all K
+            // are accepted it has not seen d_K yet: feed it as one token. Two
+            // tokens in one pass would run GEMM, which costs more than two
+            // GEMV steps.
+            {
+                let _span = device_debug_span!(&device, sync, "spec.rollback")?;
+                target.truncate_kv_cache(n + 1 + j)?;
+                if j < k {
+                    draft.truncate_kv_cache(n + 1 + j)?;
+                } else {
+                    let step = Instant::now();
+                    let input = Tensor::new(&[drafts[k - 1]], &device)?.unsqueeze(0)?;
+                    draft.hidden_states(&input, n + k)?;
+                    report.draft_ms += ms(step);
+                }
+            }
+            n += 1 + j;
+
+            // 5. Append, cut at EOS and at max_new_tokens.
+            let room = max_new_tokens - generated.len();
+            let (tokens, stop) = spec::round_tokens(&drafts, j, next, &eos, room);
+            let per_token = ms(round) / tokens.len().max(1) as f64;
+            decode_token_ms.extend(std::iter::repeat_n(per_token, tokens.len()));
+            generated.extend(tokens);
+            if stop {
+                break;
+            }
+        }
+
+        let decode = start.elapsed() - first_token;
+        let text = {
+            let _span = tracing::info_span!("detokenize").entered();
+            self.tokenizer
+                .decode(&generated, false)
+                .map_err(Error::TokenDecoding)?
+        };
+        let secs = |d: Duration| d.as_secs_f64().max(f64::EPSILON);
+        let generated_tokens = generated.len();
+        let steps = (generated_tokens - 1) as f64;
+        Ok(GenerationReport {
+            batch: 1,
+            prompt_tokens,
+            generated_tokens,
+            prefill_tokens_per_s: prompt_tokens as f64 / secs(first_token),
+            decode_tokens_per_s: steps / secs(decode),
+            decode_tokens_per_s_per_sequence: steps / secs(decode),
+            decode_ms_per_step: decode.as_secs_f64() * 1e3 / steps.max(1.0),
+            time_to_first_token_ms: first_token.as_secs_f64() * 1e3,
+            peak_memory_bytes: peak_memory_bytes(),
+            texts: vec![text],
+            decode_token_ms,
+            kv_blocks: None,
+            shared_prefix_tokens: 0,
+            speculative: Some(report),
+        })
+    }
+
     /// Empties the KV cache before a run of `rows` rows. Each row gets room
     /// for `capacity` positions. For `Paged`, the pool has the blocks that
     /// the run can need. The rows share the full blocks of the first
@@ -678,6 +866,28 @@ impl Engine {
             kind => self.model.reset_kv_cache(kind, capacity),
         }
     }
+}
+
+/// The repeat penalty of the sampler, and the generated tokens it looks at.
+const REPEAT_PENALTY: f32 = 1.1;
+const REPEAT_LAST_N: usize = 64;
+
+/// Applies the repeat penalty over the last `REPEAT_LAST_N` tokens of
+/// `context` to `logits` (`[vocab]`), and samples. Plain decode and both
+/// models of speculative decoding use it, so they choose tokens in the same
+/// way.
+fn sample_with_penalty(
+    sampler: &mut LogitsProcessor,
+    logits: &Tensor,
+    context: &[u32],
+) -> candle_core::Result<u32> {
+    let start = context.len().saturating_sub(REPEAT_LAST_N);
+    let logits = candle_transformers::utils::apply_repeat_penalty(
+        logits,
+        REPEAT_PENALTY,
+        &context[start..],
+    )?;
+    sampler.sample(&logits)
 }
 
 /// A text with words, numbers, code, and other scripts. Two tokenizers
