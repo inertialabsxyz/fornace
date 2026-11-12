@@ -5,6 +5,7 @@ the result with a number. To write a result, use [TEMPLATE.md](TEMPLATE.md).
 
 | Date | Title | Commit | Link |
 |---|---|---|---|
+| 2026-11-12 | Prefilling a shared system prompt once cuts the time to first token of 4 Qwen2 sequences 2.7× on Metal, and a paged KV cache is not needed for it | `bee2196` | [result](2026-11-12-paged-cache-qwen2-metal.md) |
 | 2026-11-09 | Q4 weights make Qwen2 decode on Metal 1.85× faster, at a 23 % perplexity cost | `43e280a` | [result](2026-11-09-quantization-qwen2-metal.md) |
 | 2026-11-05 | Batch 4 gives 1.6× the total decode speed of batch 1 for Qwen2 on Metal, but each sequence decodes at 0.40× | `dae67a1` | [result](2026-11-05-batching-qwen2-metal.md) |
 | 2026-11-04 | Fused attention makes a 4,096-token Qwen2 prefill on Metal 4.5× faster and lowers its peak from 3,403 MiB to 1,470 MiB | `c3693e3` | [result](2026-11-04-fused-attention-prefill-qwen2-metal.md) |
