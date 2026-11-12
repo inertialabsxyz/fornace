@@ -27,11 +27,15 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 tracing-chrome = "0.7.2"
 memory-stats = "1.2.0"
 
-# Candle 0.11.0 with one change: the Metal buffer pool does not reuse a
-# buffer larger than 2 × the rounded request. Without it, a long prefill with
-# the cat-contiguous KV cache holds one score buffer for each layer.
-# Remove this patch when upstream Candle has the fix.
+# Candle 0.11.0 with three changes (fork branch fornace/kv-cache-truncate):
+# - The Metal buffer pool does not reuse a buffer larger than 2 × the rounded
+#   request. Without it, a long prefill with the cat-contiguous KV cache holds
+#   one score buffer for each layer (upstream PR 3851).
+# - `KvCache::truncate`, the rollback of speculative decoding.
+# - The causal mask of the Metal `sdpa` full kernel with fewer queries than
+#   keys (upstream PR 4062). Without it, a verify pass can see later keys.
+# Remove this patch when upstream Candle has all three.
 [patch.crates-io]
-candle-core = { git = "https://github.com/inertialabsxyz/candle", rev = "79fe58df4fd9c37f330a38272140fe515aff2e43" }
-candle-nn = { git = "https://github.com/inertialabsxyz/candle", rev = "79fe58df4fd9c37f330a38272140fe515aff2e43" }
-candle-metal-kernels = { git = "https://github.com/inertialabsxyz/candle", rev = "79fe58df4fd9c37f330a38272140fe515aff2e43" }
+candle-core = { git = "https://github.com/inertialabsxyz/candle", rev = "b4090fe1c5ded2f5c80f09b920eb7aac37f3519d" }
+candle-nn = { git = "https://github.com/inertialabsxyz/candle", rev = "b4090fe1c5ded2f5c80f09b920eb7aac37f3519d" }
+candle-metal-kernels = { git = "https://github.com/inertialabsxyz/candle", rev = "b4090fe1c5ded2f5c80f09b920eb7aac37f3519d" }
