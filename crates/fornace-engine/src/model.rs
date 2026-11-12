@@ -617,7 +617,8 @@ impl Model {
             .collect();
         let mask = Tensor::from_slice(&mask, (tgt_len, tgt_len), &self.device)?;
         let mask = if seqlen_offset > 0 {
-            let mask0 = Tensor::zeros((tgt_len, seqlen_offset), self.dtype, &self.device)?;
+            // F32, as `mask`. The cast to the compute dtype comes at the end.
+            let mask0 = Tensor::zeros((tgt_len, seqlen_offset), DType::F32, &self.device)?;
             Tensor::cat(&[&mask0, &mask], D::Minus1)?
         } else {
             mask
