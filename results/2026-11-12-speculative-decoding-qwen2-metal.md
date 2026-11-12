@@ -6,8 +6,12 @@
 Speculative decoding is the one method that gives one user more tokens
 for each step without a change to the model. A small draft model guesses
 the next K tokens, and the large model checks them in one forward pass.
-With greedy sampling, the text is the text of the large model alone. On a
-server GPU it often gives 2 to 3×. On a laptop, both models share one GPU
+With greedy sampling, the text is the text of the large model alone. On
+datacenter hardware, the two papers that introduced the method report 2
+to 3× for T5-XXL (Leviathan et al., 2023,
+[arXiv:2211.17192](https://arxiv.org/abs/2211.17192)) and 2 to 2.5× for
+Chinchilla 70B (Chen et al., 2023,
+[arXiv:2302.01318](https://arxiv.org/abs/2302.01318)). On a laptop, both models share one GPU
 and one memory bandwidth. This result asks what it gives on a Mac with
 Candle: Qwen2.5-1.5B-Instruct as the target, and Qwen2.5-0.5B-Instruct as
 the draft. On free prose it is a loss at every setting. On code that
@@ -71,11 +75,12 @@ one forward pass of M tokens after the 513-token prompt (median of 10):
 
 | Target | M = 1 | M = 2 | M = 5 | M = 9 |
 |---|---:|---:|---:|---:|
-| 1.5B `bf16` | 16.6 ms | 32.8 ms | 33.7 ms | 34.2 ms |
-| 1.5B `q4` | 6.8 ms | 33.2 ms | 33.5 ms | 33.3 ms |
-| 0.5B `bf16` | 6.4 ms | 14.2 ms | 14.9 ms | 15.1 ms |
+| 1.5B `bf16` | 15.1 ms | 31.9 ms | 32.4 ms | 33.9 ms |
+| 1.5B `q4` | 6.5 ms | 32.3 ms | 32.7 ms | 35.1 ms |
+| 0.5B `bf16` | 6.0 ms | 13.9 ms | 14.2 ms | 14.6 ms |
 
-Data: `bench/runs/2026-11-12-b6d6d66-verify-cost.txt`. From M = 2 to 9
+Data: `bench/runs/2026-11-12-2d01d15-verify-cost.txt`, at `2d01d15` (the
+code of `9673634`). From M = 2 to 9
 the pass is nearly flat, so extra guesses cost only draft steps. A
 quantized target is no help: at M ≥ 2 it costs as much as `bf16`.
 
@@ -83,7 +88,9 @@ quantized target is no help: at M ≥ 2 it costs as much as `bf16`.
 ms (`bf16`), 4.9 ms (`q8`), and 3.6 ms (`q4`), against 15.28 ms for a
 1.5B step. A step has a fixed cost of about 2.5 ms (kernel launches and
 the choice of the token on the CPU) that does not fall with the model
-size. So the draft has a third of the parameters but costs 24 to 44 % of
+size: the part of a 0.5B step that is not the weight read is 2.4 to 2.6
+ms in each format (`results/2026-11-09-quantization-qwen2-metal.md`,
+`f491dda`). So the draft has a third of the parameters but costs 24 to 44 % of
 a target step.
 
 **α depends on the text.** On prose, the two models agree on fewer than
@@ -110,7 +117,10 @@ today's costs, α would have to rise from 0.44 to 0.88.
   head dim 128, 32 for head dim 64), the last key block is not masked.
   The queries then see later positions. In speculative decoding this hit
   about 1 check pass in 16 on the 1.5B, and the wrong keys and values
-  stayed in the cache after the rollback. Logits differed by up to 19.
+  stayed in the cache after the rollback. Logits differed by up to 19
+  (measured on a working tree before the fix, not committed). With the
+  fix, the same test (`compare_truncated` in `tests/speculative.rs`)
+  gives 0.0002 or less.
   Upstream PR 4062 fixes it. The Fornace pin carries that change.
 - Fornace's causal mask for a pass of more than one token at an offset
   mixed F32 and BF16 values, so naive attention in BF16 failed. One-token
@@ -179,8 +189,9 @@ attention, for both models.
   that the answer copies from the prompt.
 - The time of the check pass for each M comes from one test at one
   context length (513).
-- The share of the fixed cost of a step (about 2.5 ms) between the
-  kernel launches and the token choice on the CPU was not measured.
+- The share of the fixed cost of a step (about 2.5 ms, from the
+  quantization result) between the kernel launches and the token choice
+  on the CPU was not measured.
 
 ## Reproduce
 
@@ -224,8 +235,8 @@ cargo test --release --features metal -p fornace-engine \
   --test verify_cost -- --ignored --nocapture
 ```
 
-Expected: for the 1.5B in `bf16`, M = 1 near 16 ms and M = 2 to 9 near
-33 to 34 ms.
+Expected: for the 1.5B in `bf16`, M = 1 near 15 ms and M = 2 to 9 near
+32 to 34 ms.
 
 The correctness tests (about 6 minutes with both models):
 
