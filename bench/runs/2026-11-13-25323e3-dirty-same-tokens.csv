@@ -1,0 +1,46 @@
+commit,date,engine,engine_version,dtype,prompt_file,tokens,repeat_penalty,first_difference,fornace_at,engine_at,fornace_text,engine_text
+25323e3-dirty,2026-11-13,fornace,fornace@25323e3-dirty,bf16,alice-512.txt,64,1.0,,,,"map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,","map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,"
+25323e3-dirty,2026-11-13,llamacpp,llama.cpp@b12110,bf16,alice-512.txt,64,1.0,,,,"map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,","map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,"
+25323e3-dirty,2026-11-13,mistralrs,mistral.rs@v0.9.5,bf16,alice-512.txt,64,1.0,,,,"map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,","map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,"
+25323e3-dirty,2026-11-13,fornace,fornace@25323e3-dirty,q8,alice-512.txt,64,1.0,,,,"map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,","map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,"
+25323e3-dirty,2026-11-13,llamacpp,llama.cpp@b12110,q8,alice-512.txt,64,1.0,,,,"map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,","map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,"
+25323e3-dirty,2026-11-13,mistralrs,mistral.rs@v0.9.5,q8,alice-512.txt,64,1.0,,,,"map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,","map, and looked at it, and then at the pictures, and then at the
+maps, and then at the pictures, and then at the maps, and then at the
+pictures, and then at the maps, and then at the pictures, and then at
+the maps, and then at the pictures,"
+25323e3-dirty,2026-11-13,fornace,fornace@25323e3-dirty,q4,alice-512.txt,64,1.0,,,,[1] [2] [3] [4] [5] [6] [7] [8] [9] [10] [11] [12] [13] [14] [15] [16] [17] [18] [,[1] [2] [3] [4] [5] [6] [7] [8] [9] [10] [11] [12] [13] [14] [15] [16] [17] [18] [
+25323e3-dirty,2026-11-13,llamacpp,llama.cpp@b12110,q4,alice-512.txt,64,1.0,,,,[1] [2] [3] [4] [5] [6] [7] [8] [9] [10] [11] [12] [13] [14] [15] [16] [17] [18] [,[1] [2] [3] [4] [5] [6] [7] [8] [9] [10] [11] [12] [13] [14] [15] [16] [17] [18] [
+25323e3-dirty,2026-11-13,mistralrs,mistral.rs@v0.9.5,q4,alice-512.txt,64,1.0,,,,[1] [2] [3] [4] [5] [6] [7] [8] [9] [10] [11] [12] [13] [14] [15] [16] [17] [18] [,[1] [2] [3] [4] [5] [6] [7] [8] [9] [10] [11] [12] [13] [14] [15] [16] [17] [18] [

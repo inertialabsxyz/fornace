@@ -1,0 +1,9 @@
+# llama-perplexity, llama.cpp version: 0.9.0 (build 12110, commit cd959bae9), 2026-11-13T11:48Z
+# command: llama-perplexity -m models/qwen2.5-0.5b-instruct/model-<f>.llama.gguf -f bench/prompts/<file> -c <c> -ngl 99 -fa on
+# -c 2048 on alice-2048.txt fails: llama-perplexity needs at least 2 x c tokens (4096).
+alice-2048.txt -c 1024 bf16: perplexity: calculating perplexity over 2 chunks, n_ctx=1024, batch_size=2048, n_seq=2 Final estimate: PPL = 14.7937 +/- 1.13260 
+alice-2048.txt -c 1024 q8_0: perplexity: calculating perplexity over 2 chunks, n_ctx=1024, batch_size=2048, n_seq=2 Final estimate: PPL = 14.8516 +/- 1.13758 
+alice-2048.txt -c 1024 q4_0: perplexity: calculating perplexity over 2 chunks, n_ctx=1024, batch_size=2048, n_seq=2 Final estimate: PPL = 17.3256 +/- 1.36417 
+alice-4096.txt -c 2048 bf16: perplexity: calculating perplexity over 2 chunks, n_ctx=2048, batch_size=2048, n_seq=1 Final estimate: PPL = 14.2389 +/- 0.78701 
+alice-4096.txt -c 2048 q8_0: perplexity: calculating perplexity over 2 chunks, n_ctx=2048, batch_size=2048, n_seq=1 Final estimate: PPL = 14.2886 +/- 0.79005 
+alice-4096.txt -c 2048 q4_0: perplexity: calculating perplexity over 2 chunks, n_ctx=2048, batch_size=2048, n_seq=1 Final estimate: PPL = 17.0617 +/- 0.97528 
