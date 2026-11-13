@@ -393,6 +393,7 @@ fn worker(args: &Args) -> Result<()> {
         attention: args.attention,
         sync_spans: false,
         ignore_eos: args.ignore_eos,
+        repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
         draft: match (&args.draft_model, args.spec_k[0]) {
             (Some(dir), k) if k > 0 => Some(DraftConfig {
                 model_dir: dir.clone(),
@@ -788,6 +789,7 @@ mod tests {
             attention: AttentionKind::Fused,
             sync_spans: false,
             ignore_eos: true,
+            repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
             draft: None,
         }
     }

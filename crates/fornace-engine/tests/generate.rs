@@ -25,6 +25,7 @@ fn greedy_decode_names_the_capital_of_spain() {
         attention: Default::default(),
         sync_spans: false,
         ignore_eos: false,
+        repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
         draft: None,
     };
     let mut engine = Engine::load(&config).expect("load the engine");
@@ -76,6 +77,7 @@ fn generate_puts_each_new_token_at_its_position() {
         attention: AttentionKind::Naive,
         sync_spans: false,
         ignore_eos: true,
+        repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
         draft: None,
     })
     .expect("load the engine");
@@ -129,4 +131,159 @@ fn generate_puts_each_new_token_at_its_position() {
     }
     let expected = tokenizer.decode(&tokens, false).unwrap();
     assert_eq!(text, expected);
+}
+
+/// An engine on the CPU for the stream tests, with `max_new_tokens` and
+/// EOS ignored. The tests give their own options to `generate_stream`.
+fn stream_engine(max_new_tokens: usize) -> Option<Engine> {
+    let Ok(model_dir) = std::env::var("FORNACE_MODEL_DIR") else {
+        eprintln!("skipped: FORNACE_MODEL_DIR is not set");
+        return None;
+    };
+    Some(
+        Engine::load(&LoadConfig {
+            model_dir: PathBuf::from(model_dir),
+            dtype: Dtype::F16,
+            device: DeviceKind::Cpu,
+            max_new_tokens,
+            batch: 1,
+            kv_cache: fornace_engine::KvCacheKind::Prealloc,
+            block_size: fornace_engine::DEFAULT_BLOCK_SIZE,
+            kv_capacity: None,
+            share_prefix: false,
+            attention: Default::default(),
+            sync_spans: false,
+            ignore_eos: true,
+            repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
+            draft: None,
+        })
+        .expect("load the engine"),
+    )
+}
+
+const STREAM_PROMPT: &str = "Write a short list of words with accents and emoji: café, 🦀,";
+
+/// The events of a stream give the tokens and the text of the report, and
+/// the same tokens as `generate` with the same settings.
+#[test]
+fn stream_events_equal_the_report_and_generate() {
+    use std::ops::ControlFlow;
+
+    let Some(mut engine) = stream_engine(32) else {
+        return;
+    };
+    let options = fornace_engine::GenerateOptions {
+        max_new_tokens: 32,
+        ignore_eos: true,
+        repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
+    };
+    let mut ids = Vec::new();
+    let mut text = String::new();
+    let report = engine
+        .generate_stream(STREAM_PROMPT, &options, &mut |event| {
+            ids.push(event.id);
+            text.push_str(&event.text);
+            ControlFlow::Continue(())
+        })
+        .expect("stream");
+    assert_eq!(ids, report.tokens[0]);
+    // The last token of this prompt ends inside a character. The report
+    // holds that part as U+FFFD, and no event gives it.
+    let rest = report.texts[0]
+        .strip_prefix(&text)
+        .expect("the report text starts with the text of the events");
+    assert!(
+        rest.chars().all(|c| c == char::REPLACEMENT_CHARACTER),
+        "the events miss more than an incomplete last character: {rest:?}"
+    );
+    assert_eq!(report.generated_tokens, 32);
+
+    let plain = engine.generate(STREAM_PROMPT).expect("generate");
+    assert_eq!(plain.tokens[0], report.tokens[0]);
+}
+
+/// `ControlFlow::Break` after the fifth event stops the generation with
+/// five tokens.
+#[test]
+fn stream_break_after_five_tokens_gives_five_tokens() {
+    use std::ops::ControlFlow;
+
+    let Some(mut engine) = stream_engine(32) else {
+        return;
+    };
+    let options = fornace_engine::GenerateOptions {
+        max_new_tokens: 32,
+        ignore_eos: true,
+        repeat_penalty: 1.0,
+    };
+    let mut events = 0;
+    let report = engine
+        .generate_stream(STREAM_PROMPT, &options, &mut |_| {
+            events += 1;
+            if events == 5 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .expect("stream");
+    assert_eq!(events, 5);
+    assert_eq!(report.generated_tokens, 5);
+}
+
+/// The options of the call replace the `max_new_tokens` of the load config.
+#[test]
+fn stream_options_set_the_token_count() {
+    use std::ops::ControlFlow;
+
+    let Some(mut engine) = stream_engine(32) else {
+        return;
+    };
+    let options = fornace_engine::GenerateOptions {
+        max_new_tokens: 7,
+        ignore_eos: true,
+        repeat_penalty: 1.0,
+    };
+    let report = engine
+        .generate_stream(STREAM_PROMPT, &options, &mut |_| ControlFlow::Continue(()))
+        .expect("stream");
+    assert_eq!(report.generated_tokens, 7);
+}
+
+/// A character that the tokenizer splits over two or more tokens comes out
+/// whole, in the event of its last token. The joined text equals the
+/// decoded text.
+#[test]
+fn text_stream_gives_a_split_character_whole() {
+    use fornace_engine::stream::TextStream;
+    use tokenizers::Tokenizer;
+
+    let Ok(model_dir) = std::env::var("FORNACE_MODEL_DIR") else {
+        eprintln!("skipped: FORNACE_MODEL_DIR is not set");
+        return;
+    };
+    let tokenizer = Tokenizer::from_file(PathBuf::from(model_dir).join("tokenizer.json")).unwrap();
+    let text = "🦀 Rust, 中文, ünïcødé, Ελληνικά";
+    let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
+    let mut stream = TextStream::default();
+    let parts: Vec<String> = (1..=ids.len())
+        .map(|n| stream.push(&tokenizer, &ids[..n]).unwrap())
+        .collect();
+    let split = (1..ids.len()).any(|n| {
+        tokenizer
+            .decode(&ids[..n], false)
+            .unwrap()
+            .ends_with(char::REPLACEMENT_CHARACTER)
+    });
+    assert!(
+        split,
+        "no token of {text:?} ends inside a character, so the test checks nothing"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|p| !p.contains(char::REPLACEMENT_CHARACTER)),
+        "an event has an incomplete character: {parts:?}"
+    );
+    assert_eq!(parts.concat(), text);
 }

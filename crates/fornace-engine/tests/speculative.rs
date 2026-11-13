@@ -297,6 +297,7 @@ fn generate(
         },
         sync_spans: false,
         ignore_eos: true,
+        repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
         draft: draft.map(|(dir, dtype, k)| DraftConfig {
             model_dir: dir.to_path_buf(),
             dtype,

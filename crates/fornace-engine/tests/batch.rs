@@ -252,6 +252,7 @@ fn generate_batch_rows_equal_generate_on_the_cpu() {
         attention: AttentionKind::Naive,
         sync_spans: false,
         ignore_eos: true,
+        repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
         draft: None,
     })
     .unwrap();

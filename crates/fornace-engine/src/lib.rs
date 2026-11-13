@@ -13,8 +13,10 @@ pub mod quality;
 pub mod quantize;
 mod sampler;
 pub mod spec;
+pub mod stream;
 mod trace;
 
+use std::ops::ControlFlow;
 use std::panic::Location;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -33,6 +35,7 @@ pub use crate::cache::{BlockUsage, DEFAULT_BLOCK_SIZE, KvCacheKind};
 use crate::metrics::peak_memory_bytes;
 pub use crate::model::AttentionKind;
 use crate::model::{Config, ModelForCausalLM};
+use crate::stream::TextStream;
 use crate::trace::{device_debug_span, device_span};
 
 /// The errors that the engine can return.
@@ -93,6 +96,8 @@ pub enum Error {
     DraftVocabMismatch { target: usize, draft: usize },
     #[error("the --draft-model tokenizer gives other token ids than the target tokenizer")]
     DraftTokenizerMismatch,
+    #[error("streaming does not support --draft-model")]
+    StreamWithDraft,
     #[error("candle")]
     Candle(#[from] candle_core::Error),
 }
@@ -210,8 +215,43 @@ pub struct LoadConfig {
     /// Do not stop at the end-of-sequence token. Each generation then
     /// decodes exactly `max_new_tokens` tokens, so runs are comparable.
     pub ignore_eos: bool,
+    /// The repeat penalty of the sampler, over the last 64 generated tokens.
+    /// 1.0 turns it off. The default is [`DEFAULT_REPEAT_PENALTY`].
+    pub repeat_penalty: f32,
     /// A draft model for speculative decoding, or `None` for plain decode.
     pub draft: Option<DraftConfig>,
+}
+
+/// The repeat penalty of all results before the server and comparison
+/// commit.
+pub const DEFAULT_REPEAT_PENALTY: f32 = 1.1;
+
+/// The settings of one call to [`Engine::generate_stream`]. The other
+/// generate methods take them from [`LoadConfig`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GenerateOptions {
+    pub max_new_tokens: usize,
+    pub ignore_eos: bool,
+    pub repeat_penalty: f32,
+}
+
+impl From<&LoadConfig> for GenerateOptions {
+    fn from(config: &LoadConfig) -> Self {
+        GenerateOptions {
+            max_new_tokens: config.max_new_tokens,
+            ignore_eos: config.ignore_eos,
+            repeat_penalty: config.repeat_penalty,
+        }
+    }
+}
+
+/// One new token of [`Engine::generate_stream`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenEvent {
+    pub id: u32,
+    /// The new text, up to the last complete UTF-8 character. If the token
+    /// ends inside a character, the next token gives the whole character.
+    pub text: String,
 }
 
 /// The draft model of speculative decoding. It guesses `k` tokens, and the
@@ -474,19 +514,54 @@ impl Engine {
                 .map(|prompt| self.tokenize(prompt))
                 .collect::<Result<Vec<_>>>()?
         };
-        self.generate_rows(&rows, start)
+        let options = GenerateOptions::from(&self.load_config);
+        self.generate_rows(&rows, start, &options, None)
     }
 
     /// [`Engine::generate_batch`] with token ids in place of text.
     pub fn generate_tokens(&mut self, rows: &[Vec<u32>]) -> Result<GenerationReport> {
-        self.generate_rows(rows, Instant::now())
+        let options = GenerateOptions::from(&self.load_config);
+        self.generate_rows(rows, Instant::now(), &options, None)
     }
 
-    fn generate_rows(&mut self, rows: &[Vec<u32>], start: Instant) -> Result<GenerationReport> {
+    /// Generates text that continues `prompt`, one sequence, and calls
+    /// `on_token` for each new token, as soon as it is on the CPU.
+    /// `ControlFlow::Break` stops the generation after that token. The
+    /// report has the tokens up to the stop. `options` replace the settings
+    /// of [`LoadConfig`] for this call. A draft model is an error.
+    ///
+    /// The joined text of the events equals `report.texts[0]`, except for a
+    /// last token that ends inside a UTF-8 character: the report holds that
+    /// part as U+FFFD, and no event does.
+    pub fn generate_stream(
+        &mut self,
+        prompt: &str,
+        options: &GenerateOptions,
+        on_token: &mut dyn FnMut(TokenEvent) -> ControlFlow<()>,
+    ) -> Result<GenerationReport> {
+        if self.draft.is_some() {
+            return Err(Error::StreamWithDraft);
+        }
+        let start = Instant::now();
+        let row = {
+            let _span = tracing::info_span!("tokenize").entered();
+            self.tokenize(prompt)?
+        };
+        self.generate_rows(&[row], start, options, Some(on_token))
+    }
+
+    fn generate_rows(
+        &mut self,
+        rows: &[Vec<u32>],
+        start: Instant,
+        options: &GenerateOptions,
+        mut on_token: Option<&mut dyn FnMut(TokenEvent) -> ControlFlow<()>>,
+    ) -> Result<GenerationReport> {
         if rows.is_empty() {
             return Err(Error::EmptyBatch);
         }
         let batch = rows.len();
+        debug_assert!(on_token.is_none() || batch == 1, "streaming is batch 1");
         if self.draft.is_some() {
             if batch != 1 {
                 return Err(Error::DraftNeedsBatchOne(batch));
@@ -516,7 +591,7 @@ impl Engine {
         let capacity = self
             .load_config
             .kv_capacity
-            .unwrap_or(prompt_tokens + self.load_config.max_new_tokens);
+            .unwrap_or(prompt_tokens + options.max_new_tokens);
         // The cache tensors take the batch dimension from the first append.
         self.reset_kv_cache(batch, prefix, capacity);
         // End of sequence, ChatML
@@ -580,13 +655,21 @@ impl Engine {
         let first_token = start.elapsed();
 
         let mut generated: Vec<Vec<u32>> = next.iter().map(|&t| vec![t]).collect();
+        let mut text = TextStream::default();
+        let mut stopped = false;
+        if let Some(on_token) = on_token.as_mut() {
+            stopped = emit(&self.tokenizer, &mut text, &generated[0], on_token)?;
+        }
 
-        let mut decode_token_ms = Vec::with_capacity(self.load_config.max_new_tokens);
+        let mut decode_token_ms = Vec::with_capacity(options.max_new_tokens);
         // The prompt fills positions 0 to T - 1. The token from the prefill
         // goes in at position T.
-        for (pos, _) in (prompt_tokens..).zip(1..self.load_config.max_new_tokens) {
+        for (pos, _) in (prompt_tokens..).zip(1..options.max_new_tokens) {
+            if stopped {
+                break;
+            }
             let step = Instant::now();
-            let _step = device_span!(&self.device, sync, "decode.step", pos)?;
+            let step_span = device_span!(&self.device, sync, "decode.step", pos)?;
             let logits = {
                 let _span = device_span!(&self.device, sync, "forward")?;
                 // #3 Input tensor: the next token of each row, [B, 1]
@@ -606,16 +689,24 @@ impl Engine {
                     .iter_mut()
                     .zip(&generated)
                     .enumerate()
-                    .map(|(b, (sampler, row))| sample_with_penalty(sampler, &logits.get(b)?, row))
+                    .map(|(b, (sampler, row))| {
+                        sample_with_penalty(sampler, &logits.get(b)?, row, options.repeat_penalty)
+                    })
                     .collect::<candle_core::Result<Vec<u32>>>()?
             };
             decode_token_ms.push(step.elapsed().as_secs_f64() * 1e3);
             // #6 A row samples EOS, stop the batch
-            if !self.load_config.ignore_eos && next.iter().any(|t| eos.contains(&Some(*t))) {
+            if !options.ignore_eos && next.iter().any(|t| eos.contains(&Some(*t))) {
                 break;
             }
             for (row, &t) in generated.iter_mut().zip(&next) {
                 row.push(t);
+            }
+            // The callback is outside the step span, so a trace of the step
+            // does not include it.
+            drop(step_span);
+            if let Some(on_token) = on_token.as_mut() {
+                stopped = emit(&self.tokenizer, &mut text, &generated[0], on_token)?;
             }
         }
 
@@ -675,6 +766,7 @@ impl Engine {
             .expect("generate_speculative needs a draft")
             .k;
         let max_new_tokens = self.load_config.max_new_tokens;
+        let penalty = self.load_config.repeat_penalty;
         let prompt_tokens = prompt.len();
         let Some((draft, _)) = self.draft.as_mut() else {
             unreachable!("generate_speculative needs a draft")
@@ -751,7 +843,7 @@ impl Engine {
                         .squeeze(0)?
                         .squeeze(0)?
                         .to_dtype(DType::F32)?;
-                    token = sample_with_penalty(&mut draft_sampler, &logits, &context)?;
+                    token = sample_with_penalty(&mut draft_sampler, &logits, &context, penalty)?;
                     drafts.push(token);
                     context.push(token);
                 }
@@ -777,6 +869,7 @@ impl Engine {
                         &mut sampler,
                         &logits.get(i)?,
                         &context,
+                        penalty,
                     )?);
                     context.push(guess);
                 }
@@ -784,6 +877,7 @@ impl Engine {
                     &mut sampler,
                     &logits.get(k)?,
                     &context,
+                    penalty,
                 )?);
                 tokens
             };
@@ -872,26 +966,42 @@ impl Engine {
     }
 }
 
-/// The repeat penalty of the sampler, and the generated tokens it looks at.
-const REPEAT_PENALTY: f32 = 1.1;
+/// The generated tokens that the repeat penalty looks at.
 const REPEAT_LAST_N: usize = 64;
 
-/// Applies the repeat penalty over the last `REPEAT_LAST_N` tokens of
-/// `context` to `logits` (`[vocab]`), and samples. Plain decode and both
+/// Applies the repeat penalty `penalty` over the last `REPEAT_LAST_N` tokens
+/// of `context` to `logits` (`[vocab]`), and samples. Plain decode and both
 /// models of speculative decoding use it, so they choose tokens in the same
-/// way.
+/// way. A penalty of 1.0 changes no logit, so it skips the copy to the CPU
+/// that the penalty needs.
 fn sample_with_penalty(
     sampler: &mut LogitsProcessor,
     logits: &Tensor,
     context: &[u32],
+    penalty: f32,
 ) -> candle_core::Result<u32> {
+    if penalty == 1.0 {
+        return sampler.sample(logits);
+    }
     let start = context.len().saturating_sub(REPEAT_LAST_N);
-    let logits = candle_transformers::utils::apply_repeat_penalty(
-        logits,
-        REPEAT_PENALTY,
-        &context[start..],
-    )?;
+    let logits =
+        candle_transformers::utils::apply_repeat_penalty(logits, penalty, &context[start..])?;
     sampler.sample(&logits)
+}
+
+/// Gives `on_token` the last token of `generated` and its new text. Returns
+/// true if the callback asks to stop.
+fn emit(
+    tokenizer: &Tokenizer,
+    text: &mut TextStream,
+    generated: &[u32],
+    on_token: &mut dyn FnMut(TokenEvent) -> ControlFlow<()>,
+) -> Result<bool> {
+    let id = *generated
+        .last()
+        .expect("the first token is always generated");
+    let text = text.push(tokenizer, generated)?;
+    Ok(on_token(TokenEvent { id, text }).is_break())
 }
 
 /// A text with words, numbers, code, and other scripts. Two tokenizers
@@ -1032,6 +1142,7 @@ mod tests {
             attention: AttentionKind::Fused,
             sync_spans: false,
             ignore_eos: false,
+            repeat_penalty: DEFAULT_REPEAT_PENALTY,
             draft: None,
         };
         assert!(matches!(
@@ -1054,6 +1165,7 @@ mod tests {
             attention: AttentionKind::Naive,
             sync_spans: false,
             ignore_eos: false,
+            repeat_penalty: DEFAULT_REPEAT_PENALTY,
             draft: Some(DraftConfig {
                 model_dir: PathBuf::from("does-not-exist-either"),
                 dtype: Dtype::F16,

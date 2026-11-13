@@ -151,6 +151,7 @@ fn main() -> anyhow::Result<()> {
         attention: args.attention,
         sync_spans: args.trace.is_some() && args.trace_sync,
         ignore_eos: args.ignore_eos,
+        repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
         draft: args.draft_model.map(|model_dir| DraftConfig {
             model_dir,
             dtype: args.draft_dtype,
