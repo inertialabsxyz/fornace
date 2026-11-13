@@ -94,6 +94,28 @@ run to stderr: the blocks in use, the blocks in the pool, the positions
 stored, and the share of the positions in the blocks in use that holds
 nothing. These numbers are not in the CSV file.
 
+## Reference engines
+
+The comparison runs llama.cpp and mistral.rs on the same model. Two
+scripts prepare them:
+
+```sh
+scripts/get-reference-engines.sh --install
+scripts/make-reference-weights.sh ./models/qwen2.5-0.5b-instruct
+```
+
+- `get-reference-engines.sh` installs llama.cpp with Homebrew, and builds
+  mistral.rs at a fixed tag with Metal in `~/.cache/fornace/ref` (set
+  `FORNACE_REF_DIR` to change it). Without `--install`, it installs
+  nothing. It writes the version and the commit of each engine to
+  `bench/engines.txt`.
+- `make-reference-weights.sh` writes `model-bf16.llama.gguf`,
+  `model-q8_0.llama.gguf`, and `model-q4_0.llama.gguf` from
+  `model.safetensors`, with the llama.cpp converter and
+  `llama-quantize --pure`. It prints the SHA-256 of each file. The Q8_0
+  and Q4_0 tensors are the same bytes as the files of `make quantize`.
+  Only the tensor names and the metadata differ.
+
 ## Metrics for a batch
 
 A row with `batch` B has B sequences. Each sequence has T prompt tokens
