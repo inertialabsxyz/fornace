@@ -139,11 +139,12 @@ impl Weights<'_> {
                 Proj::Dense(linear_no_bias(in_dim, out_dim, vb.clone())?)
             }
             (Weights::Quantized(vb), true) => {
-                Proj::Quantized(quantized_nn::linear(in_dim, out_dim, vb.clone())?)
+                Proj::Quantized(quantized_nn::linear(in_dim, out_dim, vb.clone())?, false)
             }
-            (Weights::Quantized(vb), false) => {
-                Proj::Quantized(quantized_nn::linear_no_bias(in_dim, out_dim, vb.clone())?)
-            }
+            (Weights::Quantized(vb), false) => Proj::Quantized(
+                quantized_nn::linear_no_bias(in_dim, out_dim, vb.clone())?,
+                false,
+            ),
         })
     }
 
@@ -162,7 +163,17 @@ impl Weights<'_> {
 #[derive(Debug, Clone)]
 enum Proj {
     Dense(Linear),
-    Quantized(quantized_nn::Linear),
+    /// The bool: put the rows of a decode batch on the M axis (see
+    /// [`ModelForCausalLM::set_quantized_rows_on_m`]).
+    Quantized(quantized_nn::Linear, bool),
+}
+
+impl Proj {
+    fn set_rows_on_m(&mut self, on: bool) {
+        if let Proj::Quantized(_, rows_on_m) = self {
+            *rows_on_m = on;
+        }
+    }
 }
 
 impl Module for Proj {
@@ -174,11 +185,21 @@ impl Module for Proj {
             // one row. A batch gives both: `lm_head` gets the last position
             // of each row, `[batch, 1, hidden]`, as a strided view. So copy
             // such an input to a new buffer at offset 0.
-            Proj::Quantized(p) => {
-                if xs.is_contiguous() && xs.layout().start_offset() == 0 {
-                    p.forward(xs)
+            Proj::Quantized(p, rows_on_m) => {
+                let xs = if xs.is_contiguous() && xs.layout().start_offset() == 0 {
+                    xs.clone()
                 } else {
-                    p.forward(&xs.force_contiguous()?)
+                    xs.force_contiguous()?
+                };
+                match xs.dims() {
+                    // Candle sends an input with one row on the M axis to
+                    // its matrix-vector kernel, once for each row of the
+                    // batch axis. As `[B, K]`, the B rows go to the matmul
+                    // kernel, which reads each weight block once.
+                    &[b, 1, k] if *rows_on_m && b > 1 => {
+                        p.forward(&xs.reshape((b, k))?)?.unsqueeze(1)
+                    }
+                    _ => p.forward(&xs),
                 }
             }
         }
@@ -764,6 +785,23 @@ impl Model {
             layer.set_attention(kind)
         }
     }
+
+    fn set_quantized_rows_on_m(&mut self, on: bool) {
+        for layer in self.layers.iter_mut() {
+            let (a, m) = (&mut layer.self_attn, &mut layer.mlp);
+            for p in [
+                &mut a.q_proj,
+                &mut a.k_proj,
+                &mut a.v_proj,
+                &mut a.o_proj,
+                &mut m.gate_proj,
+                &mut m.up_proj,
+                &mut m.down_proj,
+            ] {
+                p.set_rows_on_m(on);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -809,13 +847,12 @@ impl ModelForCausalLM {
             .get((cfg.vocab_size, cfg.hidden_size), "weight")?;
         let embed_tokens = Embedding::Quantized(QMatMul::from_arc(embeddings.clone())?);
         let lm_head = if vb.contains_key("lm_head.weight") {
-            Proj::Quantized(quantized_nn::linear_no_bias(
-                cfg.hidden_size,
-                cfg.vocab_size,
-                vb.pp("lm_head"),
-            )?)
+            Proj::Quantized(
+                quantized_nn::linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?,
+                false,
+            )
         } else {
-            Proj::Quantized(quantized_nn::Linear::from_arc(embeddings, None)?)
+            Proj::Quantized(quantized_nn::Linear::from_arc(embeddings, None)?, false)
         };
         let base_model = Model::new(cfg, Weights::Quantized(vb), embed_tokens, sync_spans)?;
         Ok(Self {
@@ -878,6 +915,15 @@ impl ModelForCausalLM {
     /// See [`Model::set_attention`].
     pub fn set_attention(&mut self, kind: AttentionKind) {
         self.base_model.set_attention(kind)
+    }
+
+    /// With quantized weights: run a decode step of B rows (`[B, 1, K]`)
+    /// as one `[B, K]` matmul in each projection and in `lm_head`, not as
+    /// one matrix-vector launch for each row. Dense weights already do
+    /// this (`candle_nn::Linear` reshapes the input). Off by default.
+    pub fn set_quantized_rows_on_m(&mut self, on: bool) {
+        self.base_model.set_quantized_rows_on_m(on);
+        self.lm_head.set_rows_on_m(on);
     }
 }
 
