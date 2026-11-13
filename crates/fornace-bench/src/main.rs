@@ -194,6 +194,12 @@ struct Args {
     /// `cache_prompt` in the tag column.
     #[arg(long)]
     cache_prompt: bool,
+    /// Run the same-tokens check instead of the speed runs. For each
+    /// dtype, Fornace generates from the first prompt in this process. Each
+    /// engine of --engines then generates over HTTP, and the check gives
+    /// the first token where its text differs. Writes a CSV file to --out.
+    #[arg(long)]
+    same_tokens: bool,
     /// A text file for the quality column. Each worker computes the
     /// perplexity of the model on it once, after its speed runs, and writes
     /// it to each of its rows. The tag column gets `quality=<file name>`.
@@ -278,6 +284,12 @@ fn parent(args: &Args) -> Result<()> {
         .out
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!("bench/runs/{date}-{commit}.csv")));
+    if args.same_tokens {
+        let out = args.out.clone().unwrap_or_else(|| {
+            PathBuf::from(format!("bench/runs/{date}-{commit}-same-tokens.csv"))
+        });
+        return same_tokens(args, &commit, &date, &out);
+    }
     check_transport(args)?;
     let mut rows = Vec::new();
     let mut levels = Vec::new();
@@ -345,6 +357,150 @@ fn parent(args: &Args) -> Result<()> {
     }
     if !levels.is_empty() {
         print!("{}", level_summary(&levels));
+    }
+    Ok(())
+}
+
+/// One line of the same-tokens check.
+#[derive(Serialize)]
+struct SameTokens {
+    commit: String,
+    date: String,
+    engine: String,
+    engine_version: String,
+    dtype: String,
+    prompt_file: String,
+    tokens: usize,
+    repeat_penalty: f32,
+    /// The first Fornace token, from 0, that the engine does not give.
+    /// Empty if the texts are equal.
+    first_difference: Option<usize>,
+    /// 40 characters of each text from the token that differs.
+    fornace_at: String,
+    engine_at: String,
+    fornace_text: String,
+    engine_text: String,
+}
+
+/// The same-tokens check. Fornace in this process is the reference.
+fn same_tokens(args: &Args, commit: &str, date: &str, out: &Path) -> Result<()> {
+    let tokenizer = load_tokenizer(&args.model)?;
+    let path = &args.prompts[0];
+    let prompt = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let prompt_tokens = tokenizer
+        .encode(prompt.as_str(), true)
+        .map_err(|e| e.to_string())?
+        .len();
+    let n = args.max_new_tokens;
+    let mut lines = Vec::new();
+    for &dtype in &args.dtypes {
+        let mut engine = Engine::load(&LoadConfig {
+            model_dir: args.model.clone(),
+            dtype,
+            device: args.device,
+            max_new_tokens: n,
+            batch: 1,
+            kv_cache: KvCacheKind::Prealloc,
+            block_size: DEFAULT_BLOCK_SIZE,
+            kv_capacity: None,
+            share_prefix: false,
+            attention: args.attention,
+            sync_spans: false,
+            ignore_eos: true,
+            repeat_penalty: args.repeat_penalty,
+            draft: None,
+        })?;
+        let column_dtype = engine.effective_dtype().to_string();
+        let report = engine.generate(&prompt)?;
+        drop(engine);
+        let tokens = &report.tokens[0];
+        let prefixes = (1..=tokens.len())
+            .map(|k| tokenizer.decode(&tokens[..k], false))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let fornace_text = &report.texts[0];
+        for engine_name in &args.engines {
+            let engine = ServerEngine::parse(engine_name).ok_or("unknown engine")?;
+            let spec = ServerSpec {
+                engine,
+                dtype,
+                model_dir: args.model.clone(),
+                port: args.port,
+                context: args.server_context,
+                parallel: 1,
+                attention: args.attention,
+                device: args.device,
+                cache_prompt: false,
+            };
+            let log = std::env::temp_dir().join(format!("fornace-bench-{engine_name}-{dtype}.log"));
+            let server = Server::start(&spec, &log)?;
+            let body =
+                servers::request_body(engine, &prompt, n, args.repeat_penalty, true, false, false);
+            let agent = ureq::Agent::new_with_defaults();
+            let (response, usage) =
+                http::complete(&agent, &format!("{}/v1/completions", server.base), &body)?;
+            drop(server);
+            if usage.prompt_tokens != prompt_tokens || usage.completion_tokens != n {
+                return Err(format!(
+                    "{engine_name} {dtype}: {} prompt and {} new tokens, not {prompt_tokens} and {n}",
+                    usage.prompt_tokens, usage.completion_tokens
+                )
+                .into());
+            }
+            let text = response["choices"][0]["text"]
+                .as_str()
+                .ok_or("no text in the response")?
+                .to_string();
+            let first = fornace_bench::check::first_difference(&prefixes, &text);
+            let at = first.map_or(0, |k| if k == 0 { 0 } else { prefixes[k - 1].len() });
+            let line = SameTokens {
+                commit: commit.into(),
+                date: date.into(),
+                engine: engine_name.clone(),
+                engine_version: servers::version(engine, commit),
+                dtype: column_dtype.clone(),
+                prompt_file: file_name(path),
+                tokens: n,
+                repeat_penalty: args.repeat_penalty,
+                first_difference: first,
+                fornace_at: first.map_or(String::new(), |_| {
+                    fornace_bench::check::snippet(fornace_text, at, 40)
+                }),
+                engine_at: first.map_or(String::new(), |_| {
+                    fornace_bench::check::snippet(&text, at, 40)
+                }),
+                fornace_text: fornace_text.clone(),
+                engine_text: text,
+            };
+            eprintln!(
+                "{engine_name} {column_dtype}: first difference {:?}: fornace {:?}, {engine_name} {:?}",
+                line.first_difference, line.fornace_at, line.engine_at
+            );
+            lines.push(line);
+        }
+    }
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut w = csv::Writer::from_path(out)?;
+    for line in &lines {
+        w.serialize(line)?;
+    }
+    w.flush()?;
+    eprintln!("Wrote {} lines to {}", lines.len(), out.display());
+    println!("| engine | dtype | first difference | fornace there | engine there |");
+    println!("|---|---|---:|---|---|");
+    for l in &lines {
+        println!(
+            "| {} | {} | {} | {:?} | {:?} |",
+            l.engine,
+            l.dtype,
+            l.first_difference
+                .map_or(format!("none in {}", l.tokens), |k| k.to_string()),
+            l.fornace_at,
+            l.engine_at
+        );
     }
     Ok(())
 }

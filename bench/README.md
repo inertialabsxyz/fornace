@@ -195,6 +195,26 @@ The summary has one line for each level: the p50 and the largest
 / the wall time of the level), and the peak memory. With fewer than 100
 requests, p99 is the largest value, so the table gives the maximum.
 
+### The same-tokens check
+
+`--same-tokens` runs a correctness check instead of the speed runs:
+
+```sh
+target/release/fornace-bench --model ./models/qwen2.5-0.5b-instruct \
+    --same-tokens --engines fornace,llamacpp,mistralrs --dtypes f16,q8,q4 \
+    --attention fused --prompts bench/prompts/alice-512.txt \
+    --max-new-tokens 64 --repeat-penalty 1.0
+```
+
+For each dtype, Fornace generates from the first prompt in the bench
+process, with EOS ignored. Then each engine of `--engines` generates the
+same tokens over HTTP, without a stream. The check gives the first
+Fornace token (from 0) that the text of the engine does not continue,
+and 40 characters of each text from there. The `fornace` line compares
+the server with the process. The CSV file
+(`bench/runs/<date>-<commit>-same-tokens.csv`, or `--out`) has the full
+texts too.
+
 ### The agent load
 
 `--load agent` sends the requests of one agent harness on one machine.
