@@ -204,8 +204,12 @@ The list is the same in each run and in each engine.
 - Then it has its own part, from `code-512.txt` and `alice-de-512.txt` in
   turn, with 64, 256, and 1,024 tokens in turn. The own parts of one
   source start 31 tokens apart, and wrap to the start of the source.
-- `max_tokens` is 32, 128, and 256 in turn. So the request with 64 own
-  tokens gets 32 new tokens, 256 gets 128, and 1,024 gets 256.
+- `max_tokens` is 32, 128, and 256. It moves one step after each full
+  cycle of own lengths, so requests 0 to 2 get 32, requests 3 to 5 get
+  128, and requests 6 to 8 get 256. Every 9 requests have all 9 pairs of
+  own length and `max_tokens`. A level of 16 or 32 requests is not a
+  multiple of 9, so some pairs come more often. The list file gives each
+  pair.
 - A level at concurrency C sends at least 4 × C requests, and at least
   16.
 

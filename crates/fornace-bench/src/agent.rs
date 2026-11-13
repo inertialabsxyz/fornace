@@ -2,8 +2,9 @@
 //!
 //! Every request starts with the same system prompt. Then it has its own
 //! part, from one of two source texts in turn, with a length from a cycle.
-//! The output length has a cycle too. The list is the same in every run
-//! and in every engine.
+//! The output length has a cycle too. It moves one step for each full
+//! length cycle, so every 9 requests have all 9 (length, output) pairs. The
+//! list is the same in every run and in every engine.
 
 use tokenizers::Tokenizer;
 
@@ -11,7 +12,7 @@ use tokenizers::Tokenizer;
 pub const SYSTEM_TOKENS: usize = 256;
 /// The lengths of the own part, in turn.
 pub const OWN_CYCLE: [usize; 3] = [64, 256, 1024];
-/// `max_tokens`, in turn.
+/// `max_tokens`. One step for each full cycle of [`OWN_CYCLE`].
 pub const MAX_TOKENS_CYCLE: [usize; 3] = [32, 128, 256];
 /// The tokens between the starts of two own parts from one source. 31 has
 /// no common factor with the source lengths, so the starts are different.
@@ -41,7 +42,7 @@ pub fn plan(count: usize, source_lens: &[usize]) -> Vec<Planned> {
                 source,
                 offset: (nth * STRIDE) % source_lens[source],
                 own_tokens: OWN_CYCLE[index % OWN_CYCLE.len()],
-                max_tokens: MAX_TOKENS_CYCLE[index % MAX_TOKENS_CYCLE.len()],
+                max_tokens: MAX_TOKENS_CYCLE[(index / OWN_CYCLE.len()) % MAX_TOKENS_CYCLE.len()],
             }
         })
         .collect()
@@ -104,13 +105,23 @@ mod tests {
 
     #[test]
     fn the_lengths_follow_the_cycles_and_the_sources_alternate() {
-        let list = plan(7, &[512, 513]);
+        let list = plan(10, &[512, 513]);
         let own: Vec<usize> = list.iter().map(|p| p.own_tokens).collect();
         let max: Vec<usize> = list.iter().map(|p| p.max_tokens).collect();
         let source: Vec<usize> = list.iter().map(|p| p.source).collect();
-        assert_eq!(own, [64, 256, 1024, 64, 256, 1024, 64]);
-        assert_eq!(max, [32, 128, 256, 32, 128, 256, 32]);
-        assert_eq!(source, [0, 1, 0, 1, 0, 1, 0]);
+        assert_eq!(own, [64, 256, 1024, 64, 256, 1024, 64, 256, 1024, 64]);
+        assert_eq!(max, [32, 32, 32, 128, 128, 128, 256, 256, 256, 32]);
+        assert_eq!(source, [0, 1, 0, 1, 0, 1, 0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn every_9_requests_have_all_9_pairs() {
+        let list = plan(9, &[512, 513]);
+        let mut pairs: Vec<(usize, usize)> =
+            list.iter().map(|p| (p.own_tokens, p.max_tokens)).collect();
+        pairs.sort();
+        pairs.dedup();
+        assert_eq!(pairs.len(), 9);
     }
 
     #[test]
