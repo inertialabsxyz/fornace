@@ -18,30 +18,44 @@ pub fn peak_memory_bytes() -> u64 {
     imp::peak_memory_bytes()
 }
 
+/// Returns the peak memory of another process, as [`peak_memory_bytes`]
+/// gives it for this process. `None` if the process does not exist, or if
+/// this process cannot read it.
+pub fn peak_memory_bytes_of(pid: u32) -> Option<u64> {
+    imp::peak_memory_bytes_of(pid)
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
-    fn rusage() -> libc::rusage_info_v4 {
+    fn rusage(pid: u32) -> Option<libc::rusage_info_v4> {
         // SAFETY: proc_pid_rusage writes one rusage_info_v4 into the buffer
         // for the flavor RUSAGE_INFO_V4. A zeroed struct is a valid value.
         let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
         let rc = unsafe {
             libc::proc_pid_rusage(
-                std::process::id() as libc::c_int,
+                pid as libc::c_int,
                 libc::RUSAGE_INFO_V4,
                 (&raw mut info).cast(),
             )
         };
+        (rc == 0).then_some(info)
+    }
+
+    fn own() -> libc::rusage_info_v4 {
         // The call fails only for a bad pid or flavor, and both are fixed here.
-        debug_assert_eq!(rc, 0);
-        info
+        rusage(std::process::id()).expect("proc_pid_rusage of this process")
     }
 
     pub(super) fn memory_bytes() -> u64 {
-        rusage().ri_phys_footprint
+        own().ri_phys_footprint
     }
 
     pub(super) fn peak_memory_bytes() -> u64 {
-        rusage().ri_lifetime_max_phys_footprint
+        own().ri_lifetime_max_phys_footprint
+    }
+
+    pub(super) fn peak_memory_bytes_of(pid: u32) -> Option<u64> {
+        rusage(pid).map(|info| info.ri_lifetime_max_phys_footprint)
     }
 }
 
@@ -64,6 +78,14 @@ mod imp {
         // /proc reports. The peak is never less than the current value.
         (usage.ru_maxrss as u64 * 1024).max(memory_bytes())
     }
+
+    /// `VmHWM` of `/proc/<pid>/status`: the peak RSS.
+    pub(super) fn peak_memory_bytes_of(pid: u32) -> Option<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb * 1024)
+    }
 }
 
 #[cfg(test)]
@@ -82,5 +104,18 @@ mod tests {
             "before {before}, during {during}"
         );
         assert!(peak_memory_bytes() >= during);
+    }
+
+    #[test]
+    fn the_peak_of_a_child_process_is_readable() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let peak = peak_memory_bytes_of(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(peak.is_some_and(|p| p > 0), "peak {peak:?}");
+        assert_eq!(peak_memory_bytes_of(u32::MAX / 2), None);
     }
 }
