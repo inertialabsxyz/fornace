@@ -1,0 +1,28 @@
+# Agent requests 0 to 7, alone and in one batch, 2026-11-13T16:11Z, commit 71cae6e, Metal, EOS ignored, no repeat penalty, fused attention.
+# command: cargo test --release --features metal -p fornace-bench --test batch_tokens -- --ignored --nocapture
+| Format | Request | Prompt tokens | max_tokens | First difference | Margin there |
+|---|---:|---:|---:|---|---:|
+| bf16 | 0 | 320 | 32 | none in 32 | — |
+| bf16 | 1 | 512 | 32 | 10 | 0.375 |
+| bf16 | 2 | 1279 | 32 | none in 32 | — |
+| bf16 | 3 | 320 | 128 | 11 | 0.062 |
+| bf16 | 4 | 512 | 128 | none in 128 | — |
+| bf16 | 5 | 1280 | 128 | none in 128 | — |
+| bf16 | 6 | 320 | 256 | none in 256 | — |
+| bf16 | 7 | 512 | 256 | 13 | 0.125 |
+| q8 | 0 | 320 | 32 | none in 32 | — |
+| q8 | 1 | 512 | 32 | none in 32 | — |
+| q8 | 2 | 1279 | 32 | none in 32 | — |
+| q8 | 3 | 320 | 128 | none in 128 | — |
+| q8 | 4 | 512 | 128 | none in 128 | — |
+| q8 | 5 | 1280 | 128 | none in 128 | — |
+| q8 | 6 | 320 | 256 | none in 256 | — |
+| q8 | 7 | 512 | 256 | none in 256 | — |
+| q4 | 0 | 320 | 32 | none in 32 | — |
+| q4 | 1 | 512 | 32 | none in 32 | — |
+| q4 | 2 | 1279 | 32 | none in 32 | — |
+| q4 | 3 | 320 | 128 | none in 128 | — |
+| q4 | 4 | 512 | 128 | none in 128 | — |
+| q4 | 5 | 1280 | 128 | none in 128 | — |
+| q4 | 6 | 320 | 256 | none in 256 | — |
+| q4 | 7 | 512 | 256 | none in 256 | — |
