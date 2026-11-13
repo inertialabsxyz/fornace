@@ -1,0 +1,23 @@
+# llama-bench, llama.cpp 0.9.0 (build 12110, commit cd959bae9), Homebrew, 2026-11-12.
+# Provisional: macOS storage indexing ran during this run (load average about 24).
+# Weights: models/qwen2.5-0.5b-instruct/model-{bf16,q8_0,q4_0}.llama.gguf from
+# scripts/make-reference-weights.sh. The Q8_0 and Q4_0 tensors are the same bytes
+# as model-q8_0.gguf and model-q4_0.gguf of `make quantize`.
+# Command, for each f in bf16 q8_0 q4_0:
+#   llama-bench -m models/qwen2.5-0.5b-instruct/model-$f.llama.gguf \
+#       -p 512 -n 128 -d 0,512 -fa on -ngl 99 -r 3 -o md
+# The Fornace rows of the same session: bench/runs/2026-11-12-6f0ce78-ref-step1.csv
+| model                          |       size |     params | backend    | threads | fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | -: | --------------: | -------------------: |
+| qwen2 1B BF16                  | 942.43 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |           pp512 |      7863.38 ± 15.92 |
+| qwen2 1B BF16                  | 942.43 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |           tg128 |        185.10 ± 0.15 |
+| qwen2 1B BF16                  | 942.43 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |    pp512 @ d512 |      7260.27 ± 18.23 |
+| qwen2 1B BF16                  | 942.43 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |    tg128 @ d512 |        182.82 ± 1.34 |
+| qwen2 1B Q8_0                  | 500.79 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |           pp512 |      7357.78 ± 38.17 |
+| qwen2 1B Q8_0                  | 500.79 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |           tg128 |        262.06 ± 3.88 |
+| qwen2 1B Q8_0                  | 500.79 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |    pp512 @ d512 |      6874.61 ± 49.88 |
+| qwen2 1B Q8_0                  | 500.79 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |    tg128 @ d512 |        260.35 ± 0.50 |
+| qwen2 1B Q4_0                  | 265.25 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |           pp512 |      7535.90 ± 17.51 |
+| qwen2 1B Q4_0                  | 265.25 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |           tg128 |        360.86 ± 1.70 |
+| qwen2 1B Q4_0                  | 265.25 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |    pp512 @ d512 |      6928.81 ± 61.47 |
+| qwen2 1B Q4_0                  | 265.25 MiB |   494.03 M | BLAS,MTL   |      10 |  1 |    tg128 @ d512 |       348.11 ± 15.38 |
