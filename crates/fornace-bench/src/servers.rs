@@ -52,6 +52,8 @@ pub struct ServerSpec {
     pub device: DeviceKind,
     /// llama.cpp only: keep its prompt caches on.
     pub cache_prompt: bool,
+    /// Fornace only: `--max-batch`. `None` keeps the server default.
+    pub max_batch: Option<usize>,
 }
 
 /// The weight file of a reference engine for `dtype`, from
@@ -106,6 +108,9 @@ pub fn command(spec: &ServerSpec) -> Result<Command, String> {
             cmd.args(["--attention", &spec.attention.to_string()]);
             cmd.args(["--device", &spec.device.to_string()]);
             cmd.args(["--max-context", &spec.context.to_string()]);
+            if let Some(n) = spec.max_batch {
+                cmd.args(["--max-batch", &n.to_string()]);
+            }
             cmd.args(["--port", &port]);
             cmd
         }
@@ -302,6 +307,7 @@ mod tests {
             attention: AttentionKind::Fused,
             device: DeviceKind::Metal,
             cache_prompt: false,
+            max_batch: None,
         }
     }
 

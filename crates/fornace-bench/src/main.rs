@@ -194,6 +194,11 @@ struct Args {
     /// `cache_prompt` in the tag column.
     #[arg(long)]
     cache_prompt: bool,
+    /// HTTP, fornace only: the `--max-batch` of `fornace-server`. 1 runs one
+    /// request at a time, as before the scheduler. The rows get
+    /// `max_batch=<N>` in the tag column. Without it, the server default.
+    #[arg(long, value_name = "N")]
+    max_batch: Option<usize>,
     /// Run the same-tokens check instead of the speed runs. For each
     /// dtype, Fornace generates from the first prompt in this process. Each
     /// engine of --engines then generates over HTTP, and the check gives
@@ -437,6 +442,7 @@ fn same_tokens(args: &Args, commit: &str, date: &str, out: &Path) -> Result<()> 
                 attention: args.attention,
                 device: args.device,
                 cache_prompt: false,
+                max_batch: args.max_batch,
             };
             let log = std::env::temp_dir().join(format!("fornace-bench-{engine_name}-{dtype}.log"));
             let server = Server::start(&spec, &log)?;
@@ -679,6 +685,7 @@ fn run_http(
         attention: args.attention,
         device: args.device,
         cache_prompt: args.cache_prompt,
+        max_batch: args.max_batch,
     };
     // The prompts of the levels, before the server starts.
     let mut sets: Vec<(usize, Vec<Request>)> = Vec::new();
@@ -761,6 +768,9 @@ fn run_http(
     }
     if args.cache_prompt {
         tag.push("cache_prompt".into());
+    }
+    if let (ServerEngine::Fornace, Some(n)) = (engine, args.max_batch) {
+        tag.push(format!("max_batch={n}"));
     }
 
     let mut rows = Vec::new();
