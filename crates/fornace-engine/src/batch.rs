@@ -10,7 +10,7 @@
 
 use std::ops::ControlFlow;
 
-use candle_core::{DType, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 
 use crate::model::RowCache;
@@ -175,7 +175,14 @@ impl Batch {
         };
         // The other paths of the engine keep one launch for each row.
         engine.model.set_quantized_m_axis_rows(usize::MAX);
-        let logits = logits?.squeeze(1)?.to_dtype(DType::F32)?;
+        // One copy of the logits of all rows to the CPU. Each row then
+        // samples on the CPU. A slice of the logits on the GPU for each row
+        // costs one kernel, one copy, and one wait for each row (about
+        // 0.27 ms each on an M4 Pro).
+        let logits = logits?
+            .squeeze(1)?
+            .to_dtype(DType::F32)?
+            .to_device(&Device::Cpu)?;
         let eos = [
             engine.tokenizer.token_to_id("<|im_end|>"),
             engine.tokenizer.token_to_id("<|endoftext|>"),
