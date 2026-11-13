@@ -1,0 +1,13 @@
+# Metal System Trace of fornace-server with 8 rows in each step, after the sampling fix.
+# 2026-11-13, commit 14dd90f, xctrace 27.2, Apple M4 Pro, macOS 27.2, Qwen2.5-0.5B-Instruct q4. Traced: for explanation only.
+# The same server, load, and commands as bench/runs/2026-11-13-105e894-trace-q4-batch8.txt.
+# A step ends at its last blit_to_cpu. Steps with 8 rows and more than 10 ms of GPU time. Medians:
+
+| Commit | 8-row steps in 2 s | Copies to the CPU in a step | GPU busy, compute, ms | Step period, ms |
+|---|---:|---:|---:|---:|
+| 105e894 (a copy for each row) | 141 | 8 | 14.31 | 17.08 |
+| 14dd90f (one copy for all rows) | 147 | 1 | 14.74 | 16.51 |
+
+# The fix removes 7 copies and 0.57 ms of a traced step (3 %). The traced sampling span of
+# 105e894 (2.1 ms) includes the cost of the tracer for each copy, so it was larger than the
+# untraced cost. Untraced, the agent load at C = 8 gained 1.1 % (bf16) and 1.6 % (q4).
