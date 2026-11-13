@@ -1,0 +1,9 @@
+# mistral.rs v0.9.5 (precompiled Metal kernels, default paged attention), GGUF Q4_0, the agent load, 2026-11-13, commit 38171e7.
+# Server: mistralrs serve -p 8090 --host 127.0.0.1 --no-ui --prefix-cache-n 0 --max-seqs 8 --kv-cache 32768tokens --dtype f32 -m models/qwen2.5-0.5b-instruct -f model-q4_0.llama.gguf
+# Bench: MISTRALRS_TAG=v0.9.5-xcode fornace-bench --transport http --load agent --concurrency 1,2,4,8 --parallel 8 --engines mistralrs --mistralrs-paged --dtypes f16,q4
+# The levels at C = 1 and C = 2 finished (from the bench log). At C = 4 a request failed, and the bench stopped. So these rows are not in the CSV.
+mistralrs q4 C=1 agent: 16 requests, ttft p50 87.1 ms, decode p50 256.1 tok/s, total 208.2 tok/s
+mistralrs q4 C=2 agent: 16 requests, ttft p50 91.3 ms, decode p50 146.9 tok/s, total 242.4 tok/s
+# The first error in the server log:
+2026-11-13T17:20:06.075363Z ERROR mistralrs_core::engine: step - Model failed with error: input tensor is not contiguous Layout { shape: [2, 1, 896], stride: [286720, 896, 1], start_offset: 285824 }
+# The same error as with --paged-attn off in commit 7. It comes when two prompts run in one step.
