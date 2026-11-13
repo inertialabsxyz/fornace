@@ -1,0 +1,35 @@
+# Metal System Traces, 2026-11-13, commit a1fffdc, xctrace 27.2
+# Apple M4 Pro, macOS 27.2. llama.cpp build 12110. Qwen2.5-0.5B-Instruct.
+# Traced runs are slower than untraced runs. Use these numbers to explain only.
+#
+# Each trace: one server, request loops that run all the time, then
+#   xcrun xctrace record --template 'Metal System Trace' --attach <server pid> --time-limit 2s
+#   xcrun xctrace export --input <trace> --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-intervals"]'
+# Servers:
+#   llama-server -m <model>-<f>.llama.gguf -ngl 99 -fa on -lm none -c <4096 x np> -np <np> --no-cache-prompt -cram 0
+#   target/release/fornace-server --model <model> --dtype <f16|q4> --attention fused
+# Decode traces: prompt "The capital of Spain is", max_tokens 600, ignore_eos, temperature 0, repeat penalty 1.0.
+# Prefill traces: alice-512.txt (513 tokens), max_tokens 1.
+#
+# A step ends at the copy of the logits to the CPU (llama.cpp "Blit Command",
+# Fornace "blit_to_cpu"). For each step: the command buffers (with the copy),
+# the GPU busy time (sum of the top-level GPU intervals), and the period (the
+# start of the step to the start of the next). Idle = period - busy. Medians.
+# Prefill rows use only steps with more than 20 ms of GPU time. Their idle
+# time includes the HTTP request and the tokenizer of the next request.
+#
+# Kernels are not counted. The Fornace labels name rmsnorm, rope, and the
+# attention kernels only (122 named in one decode step: 49 rmsnorm, 48 rope,
+# 24 vector_attention, 1 blit_to_cpu). The matmul kernels have no label.
+# llama.cpp labels no kernel.
+
+| Trace | steps | compute command buffers | GPU busy ms | step period ms | GPU idle ms | GPU busy share |
+|---|---:|---:|---:|---:|---:|---:|
+| fornace-q4-decode | 688 | 11 | 2.795 | 3.279 | 0.484 | 85 % |
+| llamacpp-q4-decode | 714 | 3 | 2.378 | 3.179 | 0.801 | 75 % |
+| fornace-bf16-decode | 380 | 11 | 5.496 | 6.046 | 0.550 | 91 % |
+| llamacpp-bf16-decode | 403 | 3 | 5.036 | 5.725 | 0.689 | 88 % |
+| llamacpp-q4-np8-c1 | 710 | 3 | 2.384 | 3.190 | 0.806 | 75 % |
+| llamacpp-q4-np8-c4 | 519 | 3 | 3.157 | 4.263 | 1.106 | 74 % |
+| fornace-q4-prefill | 22 | 14 | 87.563 | 99.783 | 12.220 | 88 % |
+| llamacpp-q4-prefill | 27 | 5 | 66.723 | 79.021 | 12.298 | 84 % |

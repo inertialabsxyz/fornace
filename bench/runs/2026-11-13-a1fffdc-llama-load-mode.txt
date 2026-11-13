@@ -1,0 +1,35 @@
+# llama.cpp decode tok/s with -lm mmap (the default) and -lm none, ABBA order (mmap, none, none, mmap).
+# 2026-11-13T13:12Z, commit a1fffdc, llama.cpp build 12110, alice-512.txt, 128 tokens, 3 recorded requests after 1 warm-up, client times.
+q4_0 {'mmap': [335.5, 336.3], 'none': [337.4, 339.4]} none/mmap 1.008
+bf16 {'mmap': [185.1, 184.8], 'none': [184.8, 184.9]} none/mmap 0.999
+
+# The script:
+    import json, subprocess, sys, time, urllib.request
+    M = "/Users/andy/devel/fornace/models/qwen2.5-0.5b-instruct"
+    prompt = open("/Users/andy/devel/fornace/bench/prompts/alice-512.txt").read()
+    def run(fmt, mode):
+        cmd = ["llama-server", "-m", f"{M}/model-{fmt}.llama.gguf", "-ngl", "99", "-fa", "on", "-lm", mode,
+               "-c", "4096", "-np", "1", "--no-cache-prompt", "-cram", "0", "--host", "127.0.0.1", "--port", "8096"]
+        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(240):
+            try: urllib.request.urlopen("http://127.0.0.1:8096/health"); break
+            except Exception: time.sleep(0.25)
+        body = json.dumps({"prompt": prompt, "max_tokens": 128, "stream": True, "temperature": 0,
+                           "ignore_eos": True, "repeat_penalty": 1.0, "cache_prompt": False}).encode()
+        out = []
+        for i in range(4):
+            req = urllib.request.Request("http://127.0.0.1:8096/v1/completions", body, {"Content-Type": "application/json"})
+            first = last = None
+            with urllib.request.urlopen(req) as r:
+                for line in r:
+                    if line.startswith(b"data: {") and json.loads(line[6:])["choices"][0]["text"]:
+                        last = time.perf_counter(); first = first or last
+            if i: out.append(127 / (last - first))
+        p.terminate(); p.wait()
+        return sum(out) / len(out)
+    for fmt in ("q4_0", "bf16"):
+        res = {m: [] for m in ("mmap", "none")}
+        for mode in ("mmap", "none", "none", "mmap"):
+            res[mode].append(run(fmt, mode))
+        print(fmt, {m: [round(v, 1) for v in vs] for m, vs in res.items()},
+              "none/mmap %.3f" % (sum(res["none"]) / sum(res["mmap"])))
