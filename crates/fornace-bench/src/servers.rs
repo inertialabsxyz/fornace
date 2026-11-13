@@ -115,6 +115,11 @@ pub fn command(spec: &ServerSpec) -> Result<Command, String> {
             // All layers on the GPU, flash attention on, and each slot gets
             // `context` positions.
             cmd.args(["-ngl", "99", "-fa", "on"]);
+            // Read the weights into memory, not a map of the file. A mapped
+            // file is clean file memory, and the physical footprint does not
+            // count it. Fornace and mistral.rs hold their weights in the
+            // footprint, so the memory column needs the same here.
+            cmd.args(["-lm", "none"]);
             cmd.args(["-c", &(spec.context * spec.parallel).to_string()]);
             cmd.args(["-np", &spec.parallel.to_string()]);
             if !spec.cache_prompt {
@@ -311,8 +316,8 @@ mod tests {
         let cmd = command(&spec(ServerEngine::LlamaCpp, Dtype::Q4)).unwrap();
         assert_eq!(
             args(&cmd).join(" "),
-            "-m /m/model-q4_0.llama.gguf -ngl 99 -fa on -c 32768 -np 8 --no-cache-prompt \
-             -cram 0 --host 127.0.0.1 --port 8090"
+            "-m /m/model-q4_0.llama.gguf -ngl 99 -fa on -lm none -c 32768 -np 8 \
+             --no-cache-prompt -cram 0 --host 127.0.0.1 --port 8090"
         );
         let mut on = spec(ServerEngine::LlamaCpp, Dtype::F16);
         on.cache_prompt = true;

@@ -159,9 +159,11 @@ The bench writes it to stderr before each start, and the server output
 to a log file in the temporary directory. The server is ready when its
 `/health` route gives 200, or the bench stops after 120 s.
 
-- llama.cpp: `llama-server` from `PATH`, with `-ngl 99 -fa on`,
+- llama.cpp: `llama-server` from `PATH`, with `-ngl 99 -fa on -lm none`,
   `-c` (the slots × `--server-context`), `-np`, and both prompt caches
-  off (`--no-cache-prompt -cram 0`).
+  off (`--no-cache-prompt -cram 0`). `-lm none` reads the weights into
+  memory. By default llama.cpp maps the file, and the physical footprint
+  does not count a mapped file, so the peak memory leaves out the weights.
 - mistral.rs: `mistralrs serve` from `scripts/get-reference-engines.sh`,
   with `--prefix-cache-n 0 --max-seqs <N> --paged-attn off`. GGUF also
   gets `--dtype f32`. The model name of each request is `default`.
@@ -235,7 +237,8 @@ The list is the same in each run and in each engine.
 
 The bench builds each prompt from token ids, and decodes it to text. An
 own part that starts inside a character starts at the next token. The
-bench writes the list to `<CSV name>-agent-load.csv`: the index, the
+bench writes the list to `<CSV name>-agent-load-<N>.csv`, with N the
+requests of the largest level: the index, the
 source, the first token, the token counts, and `max_tokens`. The
 `prompt_tokens` column is the count of the decoded text, which can differ
 from the sum of the parts by a token.
