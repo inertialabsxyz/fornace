@@ -451,39 +451,72 @@ impl Engine {
     /// The perplexity of the model on `text`: exp of the mean negative
     /// log-probability of each token after the first, given the tokens
     /// before it. One forward pass gives the hidden states of all
-    /// positions. `lm_head` and the loss run on chunks of positions, so the
-    /// full `[T, vocab]` logits never exist at once. No repeat penalty.
+    /// positions. No repeat penalty.
     pub fn perplexity(&mut self, text: &str) -> Result<f64> {
-        /// Positions for each `lm_head` chunk: 256 × 151,936 F32 logits is
-        /// 156 MB.
-        const CHUNK: usize = 256;
         let sync = self.load_config.sync_spans;
         let _span = device_span!(&self.device, sync, "perplexity")?;
-        let ids = self
+        let ids = self.quality_ids(text)?;
+        if ids.len() < 2 {
+            return Err(Error::TextTooShort(ids.len()));
+        }
+        let (nll, count) = self.nll(&ids, 0..ids.len() - 1)?;
+        Ok(quality::perplexity(nll, count))
+    }
+
+    /// The perplexity as `llama-perplexity -c <ctx>` computes it. The text
+    /// is cut into chunks of `ctx` tokens, and each chunk runs on its own,
+    /// from position 0. Only the second half of each chunk is scored (see
+    /// [`quality::llama_scored`]), so each scored token has at least
+    /// `ctx / 2` tokens before it. A rest shorter than `ctx` is not used.
+    pub fn perplexity_chunked(&mut self, text: &str, ctx: usize) -> Result<f64> {
+        let sync = self.load_config.sync_spans;
+        let _span = device_span!(&self.device, sync, "perplexity")?;
+        let ids = self.quality_ids(text)?;
+        let chunks = quality::llama_chunks(ids.len(), ctx);
+        if chunks.is_empty() {
+            return Err(Error::TextTooShort(ids.len()));
+        }
+        let (mut nll, mut count) = (0f64, 0usize);
+        for chunk in chunks {
+            let (n, c) = self.nll(&ids[chunk], quality::llama_scored(ctx))?;
+            nll += n;
+            count += c;
+        }
+        Ok(quality::perplexity(nll, count))
+    }
+
+    fn quality_ids(&self, text: &str) -> Result<Vec<u32>> {
+        Ok(self
             .tokenizer
             .encode(text, true)
             .map_err(Error::TokenEncoding)?
             .get_ids()
-            .to_vec();
-        if ids.len() < 2 {
-            return Err(Error::TextTooShort(ids.len()));
-        }
+            .to_vec())
+    }
+
+    /// Runs `ids` from position 0, and sums −log p(ids[p + 1]) over the
+    /// positions p in `scored`. Returns the sum and the count.
+    /// `lm_head` and the loss run on chunks of positions, so the full
+    /// `[T, vocab]` logits never exist at once.
+    fn nll(&mut self, ids: &[u32], scored: std::ops::Range<usize>) -> Result<(f64, usize)> {
+        /// Positions for each `lm_head` chunk: 256 × 151,936 F32 logits is
+        /// 156 MB.
+        const CHUNK: usize = 256;
         self.reset_kv_cache(1, 0, ids.len());
-        let input = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
+        let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
         let hidden = self.model.hidden_states(&input, 0)?.squeeze(0)?;
-        let targets = Tensor::new(&ids[1..], &self.device)?;
-        let predicted = ids.len() - 1;
+        let targets = Tensor::new(&ids[scored.start + 1..scored.end + 1], &self.device)?;
         let mut nll = 0f64;
-        for start in (0..predicted).step_by(CHUNK) {
-            let len = CHUNK.min(predicted - start);
+        for start in (0..scored.len()).step_by(CHUNK) {
+            let len = CHUNK.min(scored.len() - start);
             // A narrow view has a start offset. The quantized `lm_head`
             // copies it to offset 0 (see `Proj` in `model.rs`).
-            let rows = hidden.narrow(0, start, len)?;
+            let rows = hidden.narrow(0, scored.start + start, len)?;
             let logits = self.model.lm_head(&rows)?.to_dtype(DType::F32)?;
             let log_probs = candle_nn::ops::log_softmax(&logits, D::Minus1)?;
             nll += quality::nll_sum(&log_probs, &targets.narrow(0, start, len)?)?;
         }
-        Ok(quality::perplexity(nll, predicted))
+        Ok((nll, scored.len()))
     }
 
     /// Generates text that continues `prompt`. This is

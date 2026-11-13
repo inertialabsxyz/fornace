@@ -83,6 +83,13 @@ cargo run --release -p fornace-bench -- \
 - `--quality <FILE>`: a text file for the `quality` column. Each process
   computes the perplexity of the model on it once, after its recorded
   runs, and writes it to each of its rows.
+- `--quality-ctx <N>`: score the `--quality` text as `llama-perplexity -c
+  N` does. The text is cut into chunks of N tokens, and each chunk runs on
+  its own from position 0. Only the second half of each chunk is scored,
+  so each scored token has at least N / 2 tokens before it. A rest
+  shorter than N is not used. Without this flag, one pass scores every
+  token after the first. The two numbers differ, so compare a perplexity
+  only with one of the same method. The tag gets `quality_ctx=<N>`.
 - `--repeat-penalty <P>`: the repeat penalty, over the last 64 generated
   tokens. The default is 1.1. 1.0 turns it off.
 - `--transport <LIST>`: `process`, `http`, or both, separated by commas.

@@ -205,6 +205,11 @@ struct Args {
     /// it to each of its rows. The tag column gets `quality=<file name>`.
     #[arg(long, value_name = "FILE")]
     quality: Option<PathBuf>,
+    /// Score --quality as `llama-perplexity -c <N>` does: chunks of N
+    /// tokens, each from position 0, and only the second half of each
+    /// chunk. The tag column gets `quality_ctx=<N>`.
+    #[arg(long, value_name = "N", requires = "quality")]
+    quality_ctx: Option<usize>,
     /// Run one (dtype, KV cache, batch) set and write the rows to stdout.
     #[arg(long, hide = true)]
     worker: bool,
@@ -1070,6 +1075,11 @@ fn run_worker(args: &Args, commit: &str, date: &str, set: &Set) -> Result<Vec<Ro
                 .iter()
                 .flat_map(|q| [std::ffi::OsStr::new("--quality"), q.as_os_str()]),
         )
+        .args(
+            args.quality_ctx
+                .iter()
+                .flat_map(|c| ["--quality-ctx".to_string(), c.to_string()]),
+        )
         .args(["--spec-k", &spec_k.to_string()])
         .args(
             draft_dtype
@@ -1139,7 +1149,10 @@ fn worker(args: &Args) -> Result<()> {
         (Some(d), Some(dtype)) => format!("{}:{dtype}", file_name(&d.model_dir)),
         _ => String::new(),
     };
-    let quality_file = args.quality.as_deref().map(file_name);
+    let quality_file = args.quality.as_deref().map(|path| match args.quality_ctx {
+        Some(ctx) => format!("{}; quality_ctx={ctx}", file_name(path)),
+        None => file_name(path),
+    });
     let mut rows = Vec::new();
     for prompt_path in &args.prompts {
         let prompt = std::fs::read_to_string(prompt_path)
@@ -1241,7 +1254,11 @@ fn worker(args: &Args) -> Result<()> {
     if let Some(path) = &args.quality {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let perplexity = format!("{:.3}", engine.perplexity(&text)?);
+        let perplexity = match args.quality_ctx {
+            Some(ctx) => engine.perplexity_chunked(&text, ctx)?,
+            None => engine.perplexity(&text)?,
+        };
+        let perplexity = format!("{perplexity:.3}");
         eprintln!("{dtype} perplexity on {}: {perplexity}", file_name(path));
         for row in &mut rows {
             row.quality = perplexity.clone();

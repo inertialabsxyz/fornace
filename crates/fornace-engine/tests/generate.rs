@@ -287,3 +287,21 @@ fn text_stream_gives_a_split_character_whole() {
     );
     assert_eq!(parts.concat(), text);
 }
+
+/// The chunked perplexity uses whole chunks only, and scores fewer tokens
+/// with more context than the plain perplexity, so the two differ.
+#[test]
+fn chunked_perplexity_needs_one_whole_chunk() {
+    let Some(mut engine) = stream_engine(1) else {
+        return;
+    };
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/prompts/alice-512.txt"),
+    )
+    .unwrap();
+    assert!(engine.perplexity_chunked(&text, 1024).is_err());
+    let chunked = engine.perplexity_chunked(&text, 256).expect("two chunks");
+    let plain = engine.perplexity(&text).expect("plain");
+    assert!(chunked.is_finite() && chunked > 1.0, "{chunked}");
+    assert!((chunked - plain).abs() > 1e-3, "{chunked} {plain}");
+}
