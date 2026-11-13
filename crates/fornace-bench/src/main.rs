@@ -545,7 +545,9 @@ fn load_tokenizer(model: &Path) -> Result<tokenizers::Tokenizer> {
 }
 
 /// The agent load for the largest level. Writes the list next to the CSV
-/// file, so that the load can be checked.
+/// file, so that the load can be checked. The file name has the request
+/// count, so a command with fewer requests does not write over a longer
+/// list.
 fn agent_list(
     args: &Args,
     tokenizer: &tokenizers::Tokenizer,
@@ -573,7 +575,7 @@ fn agent_list(
     let lens: Vec<usize> = sources.iter().map(Vec::len).collect();
     let list = agent::build(&agent::plan(count, &lens), &system, &sources, tokenizer)?;
     let path = out.with_file_name(format!(
-        "{}-agent-load.csv",
+        "{}-agent-load-{count}.csv",
         out.file_stem().unwrap_or_default().to_string_lossy()
     ));
     let mut w = csv::Writer::from_path(&path)?;
