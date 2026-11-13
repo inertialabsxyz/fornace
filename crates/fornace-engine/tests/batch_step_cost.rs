@@ -22,6 +22,10 @@
 //! Then it times the attention part alone: 24 layers of one fused attention
 //! launch for B rows, against B launches of one row each, with each row in
 //! its own cache tensor.
+//!
+//! `row_caches_step_cost` times the same steps with one cache for each row
+//! (`forward_rows`, the path of the scheduler), against one cache for the
+//! batch, with the M-axis thresholds of `m_axis_rows`.
 
 #![cfg(feature = "metal")]
 
@@ -31,7 +35,7 @@ use std::time::Instant;
 use candle_core::{D, DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::quantized_var_builder::VarBuilder as QVarBuilder;
-use fornace_engine::model::{Config, ModelForCausalLM};
+use fornace_engine::model::{Config, ModelForCausalLM, RowCache};
 use fornace_engine::quantize::gguf_path;
 use fornace_engine::{AttentionKind, Dtype, KvCacheKind};
 use tokenizers::Tokenizer;
@@ -118,6 +122,94 @@ fn run(model: &mut ModelForCausalLM, ids: &[u32], rows: usize, device: &Device) 
     }
     let ms = start.elapsed().as_secs_f64() * 1e3 / TIMED as f64;
     (first.unwrap(), ms)
+}
+
+/// As `run`, with one cache for each row (`forward_rows`): each row is
+/// prefilled alone, and each step runs RoPE, the cache append, and the
+/// attention once for each row. Returns the mean step time in ms.
+fn run_rows(model: &mut ModelForCausalLM, ids: &[u32], rows: usize, device: &Device) -> f64 {
+    let mut caches: Vec<RowCache> = (0..rows)
+        .map(|_| model.new_row_cache(ids.len() + WARMUP + TIMED + 1))
+        .collect();
+    let prompt = Tensor::new(ids, device).unwrap().unsqueeze(0).unwrap();
+    let mut next = Vec::new();
+    for cache in caches.iter_mut() {
+        let logits = model.forward_rows(&prompt, &mut [cache]).unwrap();
+        next.push(
+            logits
+                .squeeze(1)
+                .unwrap()
+                .argmax(D::Minus1)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap()[0],
+        );
+    }
+    let mut start = Instant::now();
+    for step in 0..WARMUP + TIMED {
+        if step == WARMUP {
+            start = Instant::now();
+        }
+        let input = Tensor::from_vec(next.clone(), (rows, 1), device).unwrap();
+        let mut refs: Vec<&mut RowCache> = caches.iter_mut().collect();
+        let logits = model
+            .forward_rows(&input, &mut refs)
+            .unwrap()
+            .squeeze(1)
+            .unwrap();
+        next = logits.argmax(D::Minus1).unwrap().to_vec1().unwrap();
+    }
+    start.elapsed().as_secs_f64() * 1e3 / TIMED as f64
+}
+
+/// The fewest rows that go on the M axis, from the first run of
+/// `batch_step_cost` at `aa23bc8`: the crossover points.
+fn m_axis_rows(format: Dtype) -> usize {
+    match format {
+        Dtype::Q8 => 5,
+        Dtype::Q4 => 7,
+        _ => usize::MAX,
+    }
+}
+
+/// The step with one cache for each row, against one cache for the batch,
+/// with the M-axis thresholds.
+#[test]
+#[ignore = "a measurement on Metal with the model"]
+fn row_caches_step_cost() {
+    let dir = repo().join("models/qwen2.5-0.5b-instruct");
+    if !dir.join("model.safetensors").exists() {
+        eprintln!("skipped: {} is missing", dir.display());
+        return;
+    }
+    let device = Device::new_metal(0).unwrap();
+    let config: Config =
+        serde_json::from_slice(&std::fs::read(dir.join("config.json")).unwrap()).unwrap();
+    let ids = prompt(&dir);
+    println!(
+        "| Format | B | One batch cache, ms | One cache for each row, ms | Difference, ms | Total tok/s, own caches |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|");
+    for format in [Dtype::F16, Dtype::Q8, Dtype::Q4] {
+        let Some(mut model) = load(&dir, &config, format, &device) else {
+            continue;
+        };
+        model.set_quantized_m_axis_rows(m_axis_rows(format));
+        let name = if format == Dtype::F16 {
+            "bf16".to_string()
+        } else {
+            format.to_string()
+        };
+        for &rows in &ROWS {
+            let (_, batch) = run(&mut model, &ids, rows, &device);
+            let own = run_rows(&mut model, &ids, rows, &device);
+            println!(
+                "| {name} | {rows} | {batch:.3} | {own:.3} | {:+.3} | {:.1} |",
+                own - batch,
+                rows as f64 * 1e3 / own
+            );
+        }
+    }
 }
 
 #[test]

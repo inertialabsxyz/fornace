@@ -138,12 +138,13 @@ impl Weights<'_> {
             (Weights::Dense(vb), false) => {
                 Proj::Dense(linear_no_bias(in_dim, out_dim, vb.clone())?)
             }
-            (Weights::Quantized(vb), true) => {
-                Proj::Quantized(quantized_nn::linear(in_dim, out_dim, vb.clone())?, false)
-            }
+            (Weights::Quantized(vb), true) => Proj::Quantized(
+                quantized_nn::linear(in_dim, out_dim, vb.clone())?,
+                usize::MAX,
+            ),
             (Weights::Quantized(vb), false) => Proj::Quantized(
                 quantized_nn::linear_no_bias(in_dim, out_dim, vb.clone())?,
-                false,
+                usize::MAX,
             ),
         })
     }
@@ -163,15 +164,16 @@ impl Weights<'_> {
 #[derive(Debug, Clone)]
 enum Proj {
     Dense(Linear),
-    /// The bool: put the rows of a decode batch on the M axis (see
-    /// [`ModelForCausalLM::set_quantized_rows_on_m`]).
-    Quantized(quantized_nn::Linear, bool),
+    /// The usize: the fewest rows of a decode batch that go on the M axis
+    /// (see [`ModelForCausalLM::set_quantized_m_axis_rows`]). `usize::MAX`
+    /// is never.
+    Quantized(quantized_nn::Linear, usize),
 }
 
 impl Proj {
-    fn set_rows_on_m(&mut self, on: bool) {
-        if let Proj::Quantized(_, rows_on_m) = self {
-            *rows_on_m = on;
+    fn set_m_axis_rows(&mut self, min_rows: usize) {
+        if let Proj::Quantized(_, rows) = self {
+            *rows = min_rows;
         }
     }
 }
@@ -185,7 +187,7 @@ impl Module for Proj {
             // one row. A batch gives both: `lm_head` gets the last position
             // of each row, `[batch, 1, hidden]`, as a strided view. So copy
             // such an input to a new buffer at offset 0.
-            Proj::Quantized(p, rows_on_m) => {
+            Proj::Quantized(p, m_axis_rows) => {
                 let xs = if xs.is_contiguous() && xs.layout().start_offset() == 0 {
                     xs.clone()
                 } else {
@@ -196,7 +198,7 @@ impl Module for Proj {
                     // its matrix-vector kernel, once for each row of the
                     // batch axis. As `[B, K]`, the B rows go to the matmul
                     // kernel, which reads each weight block once.
-                    &[b, 1, k] if *rows_on_m && b > 1 => {
+                    &[b, 1, k] if b > 1 && b >= *m_axis_rows => {
                         p.forward(&xs.reshape((b, k))?)?.unsqueeze(1)
                     }
                     _ => p.forward(&xs),
@@ -318,6 +320,30 @@ impl RotaryEmbedding {
         let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
+
+    /// The cos and sin rows of one position for each row, as
+    /// `[B, 1, dim / 2]`, for [`Self::apply_rows`]. One gather for each step,
+    /// shared by all layers.
+    fn rows_cos_sin(&self, positions: &[usize]) -> Result<(Tensor, Tensor)> {
+        let ids: Vec<u32> = positions.iter().map(|&p| p as u32).collect();
+        let ids = Tensor::new(ids.as_slice(), self.cos.device())?;
+        let cos = self.cos.index_select(&ids, 0)?.unsqueeze(1)?;
+        let sin = self.sin.index_select(&ids, 0)?.unsqueeze(1)?;
+        Ok((cos, sin))
+    }
+
+    /// RoPE for one token in each row, each row at its own position.
+    fn apply_rows(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, cos, sin)?;
+        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, cos, sin)?;
+        Ok((q_embed, k_embed))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -420,24 +446,7 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
         let (device, sync) = (xs.device(), self.sync_spans);
-
-        let (query_states, key_states, value_states) = {
-            let _span = device_debug_span!(device, sync, "attn.qkv")?;
-            let query_states = self.q_proj.forward(xs)?;
-            let key_states = self.k_proj.forward(xs)?;
-            let value_states = self.v_proj.forward(xs)?;
-
-            let query_states = query_states
-                .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let key_states = key_states
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let value_states = value_states
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            (query_states, key_states, value_states)
-        };
+        let (query_states, key_states, value_states) = self.qkv(xs)?;
 
         let (query_states, key_states) = {
             let _span = device_debug_span!(device, sync, "attn.rope")?;
@@ -458,17 +467,59 @@ impl Attention {
             }
         };
 
+        let attn_output = self.attend(&query_states, &key_states, &value_states, attention_mask)?;
+        self.output(&attn_output, b_sz, q_len)
+    }
+
+    /// The Q, K, and V projections of all rows, as `[B, heads, T, dim]`.
+    fn qkv(&self, xs: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let (b_sz, q_len, _) = xs.dims3()?;
+        let (device, sync) = (xs.device(), self.sync_spans);
+        let states = {
+            let _span = device_debug_span!(device, sync, "attn.qkv")?;
+            let query_states = self.q_proj.forward(xs)?;
+            let key_states = self.k_proj.forward(xs)?;
+            let value_states = self.v_proj.forward(xs)?;
+
+            let query_states = query_states
+                .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let key_states = key_states
+                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let value_states = value_states
+                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (query_states, key_states, value_states)
+        };
+        Ok(states)
+    }
+
+    /// Attention of the queries over all keys and values so far.
+    fn attend(
+        &self,
+        query_states: &Tensor,
+        key_states: &Tensor,
+        value_states: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let q_len = query_states.dim(2)?;
+        let (device, sync) = (query_states.device(), self.sync_spans);
         let scale = 1f64 / f64::sqrt(self.head_dim as f64);
         let attn_output = match self.attention {
             AttentionKind::Naive => {
                 let (key_states, value_states) = {
                     let _span = device_debug_span!(device, sync, "attn.repeat_kv")?;
-                    let key_states =
-                        candle_transformers::utils::repeat_kv(key_states, self.num_kv_groups)?
-                            .contiguous()?;
-                    let value_states =
-                        candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?
-                            .contiguous()?;
+                    let key_states = candle_transformers::utils::repeat_kv(
+                        key_states.clone(),
+                        self.num_kv_groups,
+                    )?
+                    .contiguous()?;
+                    let value_states = candle_transformers::utils::repeat_kv(
+                        value_states.clone(),
+                        self.num_kv_groups,
+                    )?
+                    .contiguous()?;
                     (key_states, value_states)
                 };
 
@@ -487,14 +538,72 @@ impl Attention {
                 if attention_mask.is_some() {
                     candle_core::bail!("fused attention does not take an attention mask");
                 }
-                fused_attention(&query_states, &key_states, &value_states, scale, q_len > 1)?
+                fused_attention(query_states, key_states, value_states, scale, q_len > 1)?
             }
         };
+        Ok(attn_output)
+    }
+
+    /// `[B, heads, T, dim]` back to `[B, T, hidden]`, and the O projection.
+    fn output(&self, attn_output: &Tensor, b_sz: usize, q_len: usize) -> Result<Tensor> {
+        let (device, sync) = (attn_output.device(), self.sync_spans);
         let _span = device_debug_span!(device, sync, "attn.o_proj")?;
         attn_output
             .transpose(1, 2)?
             .reshape((b_sz, q_len, self.hidden_size))?
             .apply(&self.o_proj)
+    }
+
+    /// As `forward`, for rows that each have their own cache and position.
+    /// The projections run on all rows at once. RoPE, the cache append,
+    /// and the attention run once for each row.
+    fn forward_rows(
+        &self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+        caches: &mut [&mut LayerCache],
+        rope: &RowsRope,
+    ) -> Result<Tensor> {
+        let (b_sz, q_len, _) = xs.dims3()?;
+        let (device, sync) = (xs.device(), self.sync_spans);
+        let (query_states, key_states, value_states) = self.qkv(xs)?;
+        // One RoPE launch for all rows when each row has one token.
+        let roped = match rope {
+            RowsRope::Tables(cos, sin) => {
+                let _span = device_debug_span!(device, sync, "attn.rope")?;
+                Some(
+                    self.rotary_emb
+                        .apply_rows(&query_states, &key_states, cos, sin)?,
+                )
+            }
+            RowsRope::Offset(_) => None,
+        };
+        let mut outputs = Vec::with_capacity(b_sz);
+        for (b, cache) in caches.iter_mut().enumerate() {
+            let (q, k) = match (&roped, rope) {
+                (Some((q, k)), _) => (q.narrow(0, b, 1)?, k.narrow(0, b, 1)?),
+                (None, RowsRope::Offset(offset)) => {
+                    let _span = device_debug_span!(device, sync, "attn.rope")?;
+                    self.rotary_emb.apply_rotary_emb_qkv(
+                        &query_states.narrow(0, b, 1)?,
+                        &key_states.narrow(0, b, 1)?,
+                        *offset,
+                    )?
+                }
+                (None, RowsRope::Tables(..)) => unreachable!("tables give roped states"),
+            };
+            let (k, v) = {
+                let _span = device_debug_span!(device, sync, "attn.kv_append")?;
+                cache.append(k, value_states.narrow(0, b, 1)?)?
+            };
+            outputs.push(self.attend(&q, &k, &v, attention_mask)?);
+        }
+        let attn_output = if outputs.len() == 1 {
+            outputs.pop().expect("one row")
+        } else {
+            Tensor::cat(&outputs, 0)?
+        };
+        self.output(&attn_output, b_sz, q_len)
     }
 
     fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
@@ -562,12 +671,63 @@ impl DecoderLayer {
         residual + xs
     }
 
+    fn forward_rows(
+        &self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+        caches: &mut [&mut LayerCache],
+        rope: &RowsRope,
+    ) -> Result<Tensor> {
+        let (device, sync) = (xs.device(), self.sync_spans);
+        let xs = {
+            let _span = device_debug_span!(device, sync, "attn")?;
+            let h = self.input_layernorm.forward(xs)?;
+            (self
+                .self_attn
+                .forward_rows(&h, attention_mask, caches, rope)?
+                + xs)?
+        };
+        let _span = device_debug_span!(device, sync, "mlp")?;
+        let h = xs.apply(&self.post_attention_layernorm)?.apply(&self.mlp)?;
+        xs + h
+    }
+
     fn reset_kv_cache(&mut self, kind: KvCacheKind, capacity: usize) {
         self.self_attn.reset_kv_cache(kind, capacity)
     }
 
     fn set_attention(&mut self, kind: AttentionKind) {
         self.self_attn.set_attention(kind)
+    }
+}
+
+/// How [`Model::forward_rows`] gives the positions to RoPE.
+enum RowsRope {
+    /// One row of T tokens, from this position.
+    Offset(usize),
+    /// One token in each row: the cos and sin rows of each position.
+    Tables(Tensor, Tensor),
+}
+
+/// The KV cache of one sequence for [`ModelForCausalLM::forward_rows`]: a
+/// `prealloc` cache in each layer, and the positions stored. A batch of
+/// rows has one `RowCache` for each row, so the rows can have different
+/// lengths, and a row can join or leave the batch.
+#[derive(Debug, Clone)]
+pub struct RowCache {
+    layers: Vec<LayerCache>,
+    len: usize,
+}
+
+impl RowCache {
+    /// The positions stored.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True if no position is stored.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -713,6 +873,53 @@ impl Model {
         xs.apply(&self.norm)
     }
 
+    /// The hidden states of rows that each have their own cache. `input_ids`
+    /// is `[B, T]`, with one cache in `rows` for each row. Each row starts
+    /// at the position after its cache. T above 1 (a prefill) needs one row.
+    pub fn forward_rows(
+        &mut self,
+        input_ids: &Tensor,
+        rows: &mut [&mut RowCache],
+    ) -> Result<Tensor> {
+        let (b_size, seq_len) = input_ids.dims2()?;
+        if b_size != rows.len() {
+            candle_core::bail!("{b_size} rows of ids and {} caches", rows.len());
+        }
+        if seq_len > 1 && b_size > 1 {
+            candle_core::bail!("a forward of {seq_len} tokens needs one row, not {b_size}");
+        }
+        let (device, sync) = (&self.device, self.sync_spans);
+        let offsets: Vec<usize> = rows.iter().map(|r| r.len).collect();
+        let attention_mask = if seq_len <= 1 || self.attention == AttentionKind::Fused {
+            None
+        } else {
+            let _span = device_debug_span!(device, sync, "mask")?;
+            Some(self.prepare_causal_attention_mask(1, seq_len, offsets[0])?)
+        };
+        let rope = if seq_len == 1 {
+            // All layers share one table (an `Arc`).
+            let (cos, sin) = self.layers[0].self_attn.rotary_emb.rows_cos_sin(&offsets)?;
+            RowsRope::Tables(cos, sin)
+        } else {
+            RowsRope::Offset(offsets[0])
+        };
+        let mut xs = {
+            let _span = device_debug_span!(device, sync, "embed")?;
+            self.embed_tokens.forward(input_ids)?
+        };
+        for (i, layer) in self.layers.iter().enumerate() {
+            let _span = device_debug_span!(device, sync, "layer", i)?;
+            let mut caches: Vec<&mut LayerCache> =
+                rows.iter_mut().map(|r| &mut r.layers[i]).collect();
+            xs = layer.forward_rows(&xs, attention_mask.as_ref(), &mut caches, &rope)?;
+        }
+        for row in rows.iter_mut() {
+            row.len += seq_len;
+        }
+        let _span = device_debug_span!(device, sync, "norm")?;
+        xs.apply(&self.norm)
+    }
+
     /// Empties the KV cache of each layer and sets its kind. For
     /// `KvCacheKind::Prealloc`, `capacity` is the number of positions to
     /// allocate. For `KvCacheKind::Paged`, the pool holds `capacity`
@@ -786,7 +993,7 @@ impl Model {
         }
     }
 
-    fn set_quantized_rows_on_m(&mut self, on: bool) {
+    fn set_quantized_m_axis_rows(&mut self, min_rows: usize) {
         for layer in self.layers.iter_mut() {
             let (a, m) = (&mut layer.self_attn, &mut layer.mlp);
             for p in [
@@ -798,7 +1005,7 @@ impl Model {
                 &mut m.up_proj,
                 &mut m.down_proj,
             ] {
-                p.set_rows_on_m(on);
+                p.set_m_axis_rows(min_rows);
             }
         }
     }
@@ -849,10 +1056,13 @@ impl ModelForCausalLM {
         let lm_head = if vb.contains_key("lm_head.weight") {
             Proj::Quantized(
                 quantized_nn::linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?,
-                false,
+                usize::MAX,
             )
         } else {
-            Proj::Quantized(quantized_nn::Linear::from_arc(embeddings, None)?, false)
+            Proj::Quantized(
+                quantized_nn::Linear::from_arc(embeddings, None)?,
+                usize::MAX,
+            )
         };
         let base_model = Model::new(cfg, Weights::Quantized(vb), embed_tokens, sync_spans)?;
         Ok(Self {
@@ -917,13 +1127,48 @@ impl ModelForCausalLM {
         self.base_model.set_attention(kind)
     }
 
+    /// An empty cache for one row of [`Self::forward_rows`], with
+    /// `capacity` positions in each layer. It grows if a row needs more.
+    pub fn new_row_cache(&self, capacity: usize) -> RowCache {
+        RowCache {
+            layers: (0..self.base_model.layers.len())
+                .map(|_| LayerCache::new(KvCacheKind::Prealloc, capacity))
+                .collect(),
+            len: 0,
+        }
+    }
+
+    /// The logits of the last position of each row, `[B, 1, vocab]`, for
+    /// rows that each have their own cache and position. See
+    /// [`Model::forward_rows`].
+    pub fn forward_rows(
+        &mut self,
+        input_ids: &Tensor,
+        rows: &mut [&mut RowCache],
+    ) -> Result<Tensor> {
+        let (_b_size, seq_len) = input_ids.dims2()?;
+        let xs = self
+            .base_model
+            .forward_rows(input_ids, rows)?
+            .narrow(1, seq_len - 1, 1)?;
+        self.lm_head(&xs)
+    }
+
     /// With quantized weights: run a decode step of B rows (`[B, 1, K]`)
     /// as one `[B, K]` matmul in each projection and in `lm_head`, not as
     /// one matrix-vector launch for each row. Dense weights already do
     /// this (`candle_nn::Linear` reshapes the input). Off by default.
     pub fn set_quantized_rows_on_m(&mut self, on: bool) {
-        self.base_model.set_quantized_rows_on_m(on);
-        self.lm_head.set_rows_on_m(on);
+        self.set_quantized_m_axis_rows(if on { 2 } else { usize::MAX });
+    }
+
+    /// As [`Self::set_quantized_rows_on_m`], from `min_rows` rows. Below it,
+    /// one matrix-vector launch for each row is faster (Candle's matmul
+    /// kernels have a floor of about 12 ms a step at a small M, on an M4
+    /// Pro with the 0.5B model). `usize::MAX` is never.
+    pub fn set_quantized_m_axis_rows(&mut self, min_rows: usize) {
+        self.base_model.set_quantized_m_axis_rows(min_rows);
+        self.lm_head.set_m_axis_rows(min_rows);
     }
 }
 
