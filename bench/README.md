@@ -83,6 +83,10 @@ cargo run --release -p fornace-bench -- \
 - `--quality <FILE>`: a text file for the `quality` column. Each process
   computes the perplexity of the model on it once, after its recorded
   runs, and writes it to each of its rows.
+- `--repeat-penalty <P>`: the repeat penalty, over the last 64 generated
+  tokens. The default is 1.1. 1.0 turns it off.
+- `--transport <LIST>`: `process`, `http`, or both, separated by commas.
+  The default is `process`. See "Over HTTP".
 
 On macOS, add `--features metal` to use the GPU.
 
@@ -115,6 +119,102 @@ scripts/make-reference-weights.sh ./models/qwen2.5-0.5b-instruct
   `llama-quantize --pure`. It prints the SHA-256 of each file. The Q8_0
   and Q4_0 tensors are the same bytes as the files of `make quantize`.
   Only the tensor names and the metadata differ.
+
+## Over HTTP
+
+With `--transport http`, the bench starts the server of each engine, sends
+the requests, and times them as a client. One server runs for each
+(engine, dtype), and all levels use it. Build the Fornace server first,
+with the profile and the features of the bench:
+
+```sh
+cargo build --release --features metal -p fornace-server -p fornace-bench
+target/release/fornace-bench --model ./models/qwen2.5-0.5b-instruct \
+    --engines fornace,llamacpp,mistralrs --transport http \
+    --dtypes f16,q8,q4 --attention fused --repeat-penalty 1.0 \
+    --prompts bench/prompts/alice-512.txt
+```
+
+- `--concurrency <LIST>`: the requests in flight at the same time,
+  separated by commas. The default is `1`. Each value is one level. At
+  concurrency C, C threads each send their next request when the last one
+  is done.
+- `--requests <N>`: the recorded requests of each level. The default is 3.
+- `--load <KIND>`: `plain` (every request is the prompt file) or `agent`.
+  The default is `plain`. See "The agent load".
+- `--port <N>`: the port of the server. The default is 8090. If the port
+  is in use, the bench stops.
+- `--server-context <N>`: the context positions of each server slot. The
+  default is 4096.
+- `--parallel <N>`: the slots of llama.cpp (`-np`) and mistral.rs
+  (`--max-seqs`). The default is the largest `--concurrency`. Fornace has
+  one queue, and runs one request at a time.
+- `--cache-prompt`: llama.cpp only. Keep its prompt caches on.
+
+Only `fornace` runs with `--transport process`. HTTP runs batch 1,
+`prealloc`, and no draft.
+
+The command of each server is in `crates/fornace-bench/src/servers.rs`.
+The bench writes it to stderr before each start, and the server output
+to a log file in the temporary directory. The server is ready when its
+`/health` route gives 200, or the bench stops after 120 s.
+
+- llama.cpp: `llama-server` from `PATH`, with `-ngl 99 -fa on`,
+  `-c` (the slots × `--server-context`), `-np`, and both prompt caches
+  off (`--no-cache-prompt -cram 0`).
+- mistral.rs: `mistralrs serve` from `scripts/get-reference-engines.sh`,
+  with `--prefix-cache-n 0 --max-seqs <N> --paged-attn off`. GGUF also
+  gets `--dtype f32`. The model name of each request is `default`.
+
+Each request is a `/v1/completions` request with the raw text of the
+prompt, `stream: true`, `temperature: 0`, `ignore_eos`, and the repeat
+penalty in the field of each engine (`repetition_penalty` for
+mistral.rs). Before each level, one request without a stream warms the
+server up. It is not recorded. Its `usage` must give the Fornace prompt
+token count, and with EOS ignored, `max_tokens` new tokens.
+
+The client records the time before it sends a request, and the arrival
+of each SSE line with text. It never uses the times of the server.
+
+- `ttft_ms`: the first line with text, from the send. It includes the
+  HTTP request, the time in the queue, the tokenizer, and the prefill.
+- `decode_tok_s`: (n − 1) / (the last line with text − the first).
+  n is `usage.completion_tokens`. A line can hold more than one token,
+  so the bench does not count lines. mistral.rs sends no usage in a
+  stream. With EOS ignored and the finish reason `length`, n is then
+  `max_tokens`, and the row has `n=max_tokens` in the tag.
+- `prefill_tok_s`: the prompt tokens / `ttft_ms`. It includes the request
+  time, so it is a little lower than in a process.
+- `decode_ms_mean_last64`: the mean gap between the last 64 lines with
+  text, if each line holds one token. Otherwise empty.
+- `peak_mem_mb`: the peak physical footprint of the server process, read
+  after the level. The levels before it are in the peak.
+
+The summary has one line for each level: the p50 and the largest
+`ttft_ms`, the p50 `decode_tok_s`, the total tok/s (all generated tokens
+/ the wall time of the level), and the peak memory. With fewer than 100
+requests, p99 is the largest value, so the table gives the maximum.
+
+### The agent load
+
+`--load agent` sends the requests of one agent harness on one machine.
+The list is the same in each run and in each engine.
+
+- Each request starts with the first 256 tokens of `alice-2048.txt`.
+- Then it has its own part, from `code-512.txt` and `alice-de-512.txt` in
+  turn, with 64, 256, and 1,024 tokens in turn. The own parts of one
+  source start 31 tokens apart, and wrap to the start of the source.
+- `max_tokens` is 32, 128, and 256 in turn. So the request with 64 own
+  tokens gets 32 new tokens, 256 gets 128, and 1,024 gets 256.
+- A level at concurrency C sends at least 4 × C requests, and at least
+  16.
+
+The bench builds each prompt from token ids, and decodes it to text. An
+own part that starts inside a character starts at the next token. The
+bench writes the list to `<CSV name>-agent-load.csv`: the index, the
+source, the first token, the token counts, and `max_tokens`. The
+`prompt_tokens` column is the count of the decoded text, which can differ
+from the sum of the parts by a token.
 
 ## Metrics for a batch
 
@@ -189,5 +289,12 @@ The columns are in this order. Each row is one recorded generation.
 - `alpha`: `accepted` / `tested`, with 3 decimals.
 - `draft_ms`: the total time of the draft steps, in milliseconds, untraced. It includes the extra draft step after a round with no reject.
 - `verify_ms`: the total time of the verify passes, in milliseconds, untraced. It includes the logits to the CPU and the choice of the target's token at each position.
+- `engine_version`: `fornace@<commit>`, `llama.cpp@b<build>`, or `mistral.rs@v<version>`.
+- `transport`: `process` (the engine in a worker) or `http` (the server of the engine).
+- `concurrency`: the requests in flight at the same time. 1 for process rows.
+- `request`: the index of the request in its level, from 0. Empty for process rows. For HTTP rows, `run` is `request` + 1, and `batch` is 1.
+- `repeat_penalty`: the repeat penalty of the row. 1.0 is off.
 
-The last eight columns are new on 2026-11-12. Older CSV files do not have them. Do not append new rows to an older file.
+The eight columns from `draft` to `verify_ms` are new on 2026-11-12. The last five are new on 2026-11-13. Older CSV files do not have them. Do not append new rows to an older file.
+
+For HTTP rows, `kv_cache` is `prealloc` for Fornace and empty for the other engines. `load_ms` is the time from the start of the server to its first 200 from `/health`. The tag has `np=<N>` for llama.cpp and mistral.rs, `load=agent` for the agent load, and `cache_prompt` for `--cache-prompt`.

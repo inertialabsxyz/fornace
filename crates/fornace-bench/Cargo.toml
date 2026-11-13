@@ -14,3 +14,11 @@ fornace-engine.workspace = true
 clap.workspace = true
 serde.workspace = true
 csv.workspace = true
+serde_json.workspace = true
+tokenizers.workspace = true
+ureq = { workspace = true, features = ["json"] }
+
+[dev-dependencies]
+fornace-server = { path = "../fornace-server" }
+tokio.workspace = true
+axum.workspace = true

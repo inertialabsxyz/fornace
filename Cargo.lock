@@ -860,10 +860,16 @@ dependencies = [
 name = "fornace-bench"
 version = "0.0.1"
 dependencies = [
+ "axum",
  "clap",
  "csv",
  "fornace-engine",
+ "fornace-server",
  "serde",
+ "serde_json",
+ "tokenizers 0.23.2",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]
