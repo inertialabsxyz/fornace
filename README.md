@@ -71,9 +71,13 @@ cargo run --release --features metal -p fornace-server -- \
   is loaded.
 - Flags: `--dtype` (default `f16`), `--attention` (default `fused`),
   `--device`, `--host` (default `127.0.0.1`), `--port` (default 8080),
-  `--max-context` (default 4096), and `--repeat-penalty` (default 1.1).
-- The engine runs one request at a time. Other requests wait in a queue,
-  in the order they arrive.
+  `--max-context` (default 4096), `--repeat-penalty` (default 1.1), and
+  `--max-batch` (default 8).
+- The engine runs up to `--max-batch` requests (default 8) in one decode
+  step. Before each step, one waiting request joins: its prompt runs
+  alone, then it takes part in each step. A request leaves when it ends.
+  More requests wait in a queue, in the order they arrive.
+  `--max-batch 1` runs one request at a time.
 - Decoding is greedy. A `temperature` above 0, a `top_p` below 1, an `n`
   above 1, `logprobs`, or a prompt that is a list gives 400. A prompt and
   `max_tokens` above `--max-context` also gives 400. Without `max_tokens`,

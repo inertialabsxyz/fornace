@@ -44,6 +44,7 @@ fn the_client_times_one_request_of_fornace_server() {
         model_name: "test".into(),
         max_context: 4096,
         repeat_penalty: 1.0,
+        max_batch: 8,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

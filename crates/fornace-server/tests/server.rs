@@ -41,12 +41,13 @@ fn load_config(max_new_tokens: usize) -> Option<LoadConfig> {
 
 /// Starts the server with `engine` on a free port, waits until `/health`
 /// gives 200, and returns the base URL.
-fn start(engine: Engine, model_dir: PathBuf) -> String {
+fn start(engine: Engine, model_dir: PathBuf, max_batch: usize) -> String {
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
     let config = Config {
         model_name: "test".into(),
         max_context: 4096,
         repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
+        max_batch,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -115,7 +116,7 @@ fn stream_and_full_response_equal_generate() {
     };
     let mut engine = Engine::load(&config).expect("load the engine");
     let expected = engine.generate(PROMPT).expect("generate").texts.remove(0);
-    let base = start(engine, config.model_dir);
+    let base = start(engine, config.model_dir, 8);
 
     let body = json!({"prompt": PROMPT, "max_tokens": 32, "ignore_eos": true});
     let full: Value = ureq::post(format!("{base}/v1/completions"))
@@ -137,15 +138,16 @@ fn stream_and_full_response_equal_generate() {
     assert_eq!(streamed.last["usage"]["completion_tokens"], 32);
 }
 
-/// Two requests at the same time both complete, one after the other: the
-/// first token of the second comes after the last token of the first.
+/// With `max_batch` 1 (a queue), two requests at the same time both
+/// complete, one after the other: the first token of the second comes
+/// after the last token of the first.
 #[test]
 fn two_requests_run_one_after_the_other() {
     let Some(config) = load_config(16) else {
         return;
     };
     let engine = Engine::load(&config).expect("load the engine");
-    let base = start(engine, config.model_dir);
+    let base = start(engine, config.model_dir, 1);
     let body = json!({"prompt": PROMPT, "max_tokens": 16, "ignore_eos": true, "stream": true});
     let threads: Vec<_> = (0..2)
         .map(|_| {
@@ -173,7 +175,7 @@ fn a_request_above_the_context_names_max_tokens() {
         return;
     };
     let engine = Engine::load(&config).expect("load the engine");
-    let base = start(engine, config.model_dir);
+    let base = start(engine, config.model_dir, 8);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .build()
@@ -185,4 +187,48 @@ fn a_request_above_the_context_names_max_tokens() {
     assert_eq!(response.status(), 400);
     let body: Value = response.body_mut().read_json().unwrap();
     assert_eq!(body["error"]["param"], "max_tokens");
+}
+
+/// With a batch, two requests at the same time run together: the first
+/// token of the second comes before the last token of the first. Both give
+/// the text of `Engine::generate`.
+#[test]
+fn two_requests_run_together_in_one_batch() {
+    let Some(config) = load_config(24) else {
+        return;
+    };
+    let mut engine = Engine::load(&config).expect("load the engine");
+    let second = "The capital of Spain is";
+    let expected = [
+        engine.generate(PROMPT).expect("generate").texts.remove(0),
+        engine.generate(second).expect("generate").texts.remove(0),
+    ];
+    let base = start(engine, config.model_dir, 8);
+    let threads: Vec<_> = [PROMPT, second]
+        .into_iter()
+        .enumerate()
+        .map(|(i, prompt)| {
+            let base = base.clone();
+            let body =
+                json!({"prompt": prompt, "max_tokens": 24, "ignore_eos": true, "stream": true});
+            std::thread::spawn(move || {
+                // The second request starts a little later, so that it joins
+                // a running batch.
+                std::thread::sleep(std::time::Duration::from_millis(150 * i as u64));
+                stream(&base, body)
+            })
+        })
+        .collect();
+    let runs: Vec<Streamed> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    for (run, want) in runs.iter().zip(&expected) {
+        let text: String = run.parts.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(&text, want);
+        assert_eq!(run.last["usage"]["completion_tokens"], 24);
+    }
+    let first_last = runs[0].parts.last().unwrap().0;
+    let second_first = runs[1].parts[0].0;
+    assert!(
+        second_first < first_last,
+        "the second request waited for the first to end"
+    );
 }

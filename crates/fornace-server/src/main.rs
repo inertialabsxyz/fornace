@@ -43,6 +43,10 @@ struct Args {
     /// off.
     #[arg(long, value_name = "P", default_value_t = fornace_engine::DEFAULT_REPEAT_PENALTY)]
     repeat_penalty: f32,
+    /// The most requests in one decode step. More requests wait in the
+    /// queue. 1 runs one request at a time.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    max_batch: usize,
 }
 
 #[tokio::main]
@@ -79,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         model_name,
         max_context: args.max_context,
         repeat_penalty: args.repeat_penalty,
+        max_batch: args.max_batch,
     };
     let app = fornace_server::app(config, tokenizer, move || Ok(Engine::load(&load)?));
     let addr = format!("{}:{}", args.host, args.port);

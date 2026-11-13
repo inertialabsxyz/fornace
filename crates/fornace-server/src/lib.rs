@@ -1,8 +1,8 @@
 //! An OpenAI-compatible HTTP server for one Fornace engine.
 //!
-//! The HTTP side runs on tokio. The engine runs on its own thread, and
-//! takes one request at a time from a queue (see [`engine`]). The server
-//! holds no inference state.
+//! The HTTP side runs on tokio. The engine runs on its own thread. It takes
+//! requests from a queue into one batch, and runs one decode step for all
+//! of them (see [`engine`]). The server holds no inference state.
 
 pub mod api;
 pub mod engine;
@@ -36,6 +36,9 @@ pub struct Config {
     pub max_context: usize,
     /// The repeat penalty of a request that does not give one.
     pub repeat_penalty: f32,
+    /// The most requests in one decode step. More requests wait in the
+    /// queue. 1 runs one request at a time.
+    pub max_batch: usize,
 }
 
 struct Inner {
@@ -63,13 +66,14 @@ pub fn app(
     let ready = Arc::new(AtomicBool::new(false));
     let queued = Arc::new(AtomicUsize::new(0));
     let (thread_ready, thread_queued) = (ready.clone(), queued.clone());
+    let max_batch = config.max_batch.max(1);
     std::thread::Builder::new()
         .name("engine".into())
         .spawn(move || match load() {
             Ok(engine) => {
                 eprintln!("engine loaded in {:.0} ms", engine.load_ms);
                 thread_ready.store(true, Ordering::SeqCst);
-                engine::run(engine, rx, thread_queued);
+                engine::run(engine, rx, thread_queued, max_batch);
             }
             Err(e) => {
                 eprintln!("error: cannot load the engine: {e:#}");
