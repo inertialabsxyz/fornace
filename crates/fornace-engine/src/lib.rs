@@ -464,6 +464,34 @@ impl Engine {
         Ok(quality::perplexity(nll, count))
     }
 
+    /// The difference between the two largest logits of the next token
+    /// after `ids`, with no repeat penalty, from one prefill of all ids. A
+    /// small margin is a near tie: another kernel or dtype can change the
+    /// top token there.
+    pub fn next_token_margin(&mut self, ids: &[u32]) -> Result<f32> {
+        if ids.is_empty() {
+            return Err(Error::TextTooShort(0));
+        }
+        self.reset_kv_cache(1, 0, ids.len());
+        let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
+        let logits: Vec<f32> = self
+            .model
+            .forward(&input, 0)?
+            .flatten_all()?
+            .to_dtype(DType::F32)?
+            .to_vec1()?;
+        let (mut best, mut second) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for v in logits {
+            if v > best {
+                second = best;
+                best = v;
+            } else if v > second {
+                second = v;
+            }
+        }
+        Ok(best - second)
+    }
+
     /// The perplexity as `llama-perplexity -c <ctx>` computes it. The text
     /// is cut into chunks of `ctx` tokens, and each chunk runs on its own,
     /// from position 0. Only the second half of each chunk is scored (see
