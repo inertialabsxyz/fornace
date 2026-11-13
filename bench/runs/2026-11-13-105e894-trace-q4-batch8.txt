@@ -1,0 +1,23 @@
+# Metal System Trace of fornace-server with 8 rows in each step, 2026-11-13, commit 105e894, xctrace 27.2.
+# Apple M4 Pro, macOS 27.2, Qwen2.5-0.5B-Instruct q4. Traced: for explanation only.
+#
+# Server: target/release/fornace-server --model <model> --dtype q4 --attention fused (--max-batch 8, the default).
+# Load: 8 request loops of "The capital of Spain is", max_tokens 600, ignore_eos, temperature 0, repeat penalty 1.0,
+# so 8 rows run in most steps. Then:
+#   xcrun xctrace record --template 'Metal System Trace' --attach <server pid> --time-limit 2s
+#   xcrun xctrace export --input <trace> --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-intervals"]'
+#
+# A step is the run of compute command buffers before the sampling. The sampling is the run of
+# "blit_to_cpu" copies and the small "Compute Command 0" buffers between them: one for each row.
+# Steps with 8 rows (8 copies): 140 in 2 s. Medians:
+
+| Part of one step | ms |
+|---|---:|
+| Compute command buffers | 25 |
+| GPU busy, compute | 14.316 |
+| Sampling, from the first copy to the last | 2.114 |
+| Gap from the last copy to the next step | 0.566 |
+| Step period | 17.083 |
+
+# The sampling takes one GPU-to-CPU copy for each row: Batch::step samples each row from its
+# own slice of the logits on the GPU, and each slice is one small kernel, one copy, and one wait.
