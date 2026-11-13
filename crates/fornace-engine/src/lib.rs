@@ -6,6 +6,7 @@
 //! memory. [`Engine::perplexity`] measures the quality of the weights. The
 //! model code is in [`model`], a copy of Candle's Qwen2.
 
+pub mod batch;
 mod cache;
 pub mod metrics;
 pub mod model;
