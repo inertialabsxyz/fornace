@@ -11,17 +11,24 @@
 #   - installs llama.cpp with Homebrew;
 #   - clones llama.cpp at the tag of the installed build, for
 #     convert_hf_to_gguf.py, and makes a Python environment for it;
-#   - builds mistral.rs at MISTRALRS_TAG with Metal.
+#   - builds mistral.rs at MISTRALRS_TAG with Metal, in two ways:
+#     mistralrs-<tag> compiles its Metal kernels at run time
+#     (MISTRALRS_METAL_PRECOMPILE=0), because the Command Line Tools have no
+#     Metal compiler. Its paged attention kernels do not compile at run
+#     time, so the bench runs it with --paged-attn off.
+#     mistralrs-<tag>-xcode has precompiled kernels. It is built only if the
+#     Metal compiler exists (Xcode and `xcodebuild -downloadComponent
+#     MetalToolchain`). Its default paged attention works. Select it in the
+#     bench with MISTRALRS_TAG=<tag>-xcode and --mistralrs-paged.
 #
 # Everything except the Homebrew package goes in FORNACE_REF_DIR
-# (default: ~/.cache/fornace/ref). mistral.rs compiles its Metal kernels at
-# run time (MISTRALRS_METAL_PRECOMPILE=0), because the Command Line Tools
-# have no Metal compiler. The first load is then slower.
+# (default: ~/.cache/fornace/ref).
 set -euo pipefail
 
 REF="${FORNACE_REF_DIR:-$HOME/.cache/fornace/ref}"
 MISTRALRS_TAG="${MISTRALRS_TAG:-v0.9.5}"
 MISTRALRS_BIN="$REF/mistralrs-$MISTRALRS_TAG/bin/mistralrs"
+MISTRALRS_XCODE_BIN="$REF/mistralrs-$MISTRALRS_TAG-xcode/bin/mistralrs"
 OUT="bench/engines.txt"
 
 llama_build() {
@@ -44,6 +51,12 @@ if [[ "${1:-}" == "--install" ]]; then
     fi
     (cd "$REF/mistral.rs" && MISTRALRS_METAL_PRECOMPILE=0 cargo install --locked \
         --path mistralrs-cli --features metal --root "$REF/mistralrs-$MISTRALRS_TAG")
+    if xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+        (cd "$REF/mistral.rs" && cargo install --locked \
+            --path mistralrs-cli --features metal --root "$REF/mistralrs-$MISTRALRS_TAG-xcode")
+    else
+        echo "note: no Metal compiler, so no build with precompiled kernels" >&2
+    fi
 elif [[ -n "${1:-}" ]]; then
     echo "usage: $0 [--install]" >&2
     exit 2
@@ -64,7 +77,10 @@ fi
     echo "llama.cpp binary: $(command -v llama-server)"
     echo "mistral.rs: $("$MISTRALRS_BIN" --version 2>&1 | head -1), tag $MISTRALRS_TAG, commit $(git -C "$REF/mistral.rs" rev-parse --short HEAD)"
     echo "mistral.rs candle: $(grep -m1 '^candle-core = ' "$REF/mistral.rs/Cargo.toml" | sed -n 's/.*rev = "\([0-9a-f]*\)".*/\1/p')"
-    echo "mistral.rs binary: $MISTRALRS_BIN"
+    echo "mistral.rs binary: $MISTRALRS_BIN (Metal kernels compiled at run time)"
+    if [[ -x "$MISTRALRS_XCODE_BIN" ]]; then
+        echo "mistral.rs binary: $MISTRALRS_XCODE_BIN (precompiled Metal kernels, $(xcrun -sdk macosx metal --version 2>&1 | head -1))"
+    fi
     echo "machine: $(sysctl -n machdep.cpu.brand_string), $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
 } > "$OUT"
 

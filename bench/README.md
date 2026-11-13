@@ -157,6 +157,12 @@ target/release/fornace-bench --model ./models/qwen2.5-0.5b-instruct \
   (`--max-seqs`). The default is the largest `--concurrency`. Fornace has
   one queue, and runs one request at a time.
 - `--cache-prompt`: llama.cpp only. Keep its prompt caches on.
+- `--mistralrs-paged`: mistral.rs only. Its default paged attention,
+  with a KV cache of `--parallel` × `--server-context` positions
+  (`--kv-cache <N>tokens`), as large as the slots of llama.cpp. It needs a
+  build with precompiled Metal kernels: Xcode and its Metal Toolchain
+  (`xcodebuild -downloadComponent MetalToolchain`). Select that build with
+  `MISTRALRS_TAG`. The rows get `paged` in the tag.
 - `--max-batch <N>`: Fornace only. The `--max-batch` of `fornace-server`:
   the most requests in one decode step. 1 runs one request at a time.
   Without it, the server default (8). The rows get `max_batch=<N>` in the

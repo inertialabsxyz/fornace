@@ -1,7 +1,8 @@
-# Reference engines, recorded 2026-11-12T18:26Z by scripts/get-reference-engines.sh
+# Reference engines, recorded 2026-11-13T17:05Z by scripts/get-reference-engines.sh
 llama.cpp: version: 0.9.0 (build 12110, commit cd959bae9)
 llama.cpp binary: /opt/homebrew/bin/llama-server
 mistral.rs: mistralrs 0.9.5, tag v0.9.5, commit 465191d
 mistral.rs candle: 66a8cf184a5a519671454066b1b9efd446ec9f5c
-mistral.rs binary: /Users/andy/.cache/fornace/ref/mistralrs-v0.9.5/bin/mistralrs
+mistral.rs binary: /Users/andy/.cache/fornace/ref/mistralrs-v0.9.5/bin/mistralrs (Metal kernels compiled at run time)
+mistral.rs binary: /Users/andy/.cache/fornace/ref/mistralrs-v0.9.5-xcode/bin/mistralrs (precompiled Metal kernels, Apple metal version 32023.922 (metalfe-32023.922.4))
 machine: Apple M4 Pro, 24 GB, macOS 27.2

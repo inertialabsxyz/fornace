@@ -199,6 +199,12 @@ struct Args {
     /// `max_batch=<N>` in the tag column. Without it, the server default.
     #[arg(long, value_name = "N")]
     max_batch: Option<usize>,
+    /// HTTP, mistral.rs only: its default paged attention, with a KV cache
+    /// of --parallel × --server-context positions. Needs a mistral.rs build
+    /// with precompiled Metal kernels (see `MISTRALRS_TAG`). The rows get
+    /// `paged` in the tag column.
+    #[arg(long)]
+    mistralrs_paged: bool,
     /// Run the same-tokens check instead of the speed runs. For each
     /// dtype, Fornace generates from the first prompt in this process. Each
     /// engine of --engines then generates over HTTP, and the check gives
@@ -443,6 +449,7 @@ fn same_tokens(args: &Args, commit: &str, date: &str, out: &Path) -> Result<()> 
                 device: args.device,
                 cache_prompt: false,
                 max_batch: args.max_batch,
+                mistralrs_paged: args.mistralrs_paged,
             };
             let log = std::env::temp_dir().join(format!("fornace-bench-{engine_name}-{dtype}.log"));
             let server = Server::start(&spec, &log)?;
@@ -686,6 +693,7 @@ fn run_http(
         device: args.device,
         cache_prompt: args.cache_prompt,
         max_batch: args.max_batch,
+        mistralrs_paged: args.mistralrs_paged,
     };
     // The prompts of the levels, before the server starts.
     let mut sets: Vec<(usize, Vec<Request>)> = Vec::new();
@@ -771,6 +779,9 @@ fn run_http(
     }
     if let (ServerEngine::Fornace, Some(n)) = (engine, args.max_batch) {
         tag.push(format!("max_batch={n}"));
+    }
+    if engine == ServerEngine::MistralRs && args.mistralrs_paged {
+        tag.push("paged".into());
     }
 
     let mut rows = Vec::new();

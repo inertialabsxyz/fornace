@@ -54,6 +54,10 @@ pub struct ServerSpec {
     pub cache_prompt: bool,
     /// Fornace only: `--max-batch`. `None` keeps the server default.
     pub max_batch: Option<usize>,
+    /// mistral.rs only: its default paged attention, with a KV cache of
+    /// `parallel` × `context` positions. It needs a build with the Metal
+    /// compiler (precompiled kernels). Without it, paged attention is off.
+    pub mistralrs_paged: bool,
 }
 
 /// The weight file of a reference engine for `dtype`, from
@@ -141,9 +145,16 @@ pub fn command(spec: &ServerSpec) -> Result<Command, String> {
             cmd.args(["-p", &port, "--host", "127.0.0.1", "--no-ui"]);
             cmd.args(["--prefix-cache-n", "0"]);
             cmd.args(["--max-seqs", &spec.parallel.to_string()]);
-            // The run-time compile of its paged attention kernels fails
-            // without the Metal toolchain.
-            cmd.args(["--paged-attn", "off"]);
+            if spec.mistralrs_paged {
+                // The default paged attention, with the KV cache of
+                // llama.cpp: `parallel` slots of `context` positions.
+                let tokens = spec.parallel * spec.context;
+                cmd.args(["--kv-cache", &format!("{tokens}tokens")]);
+            } else {
+                // The run-time compile of its paged attention kernels fails
+                // without the Metal toolchain.
+                cmd.args(["--paged-attn", "off"]);
+            }
             if spec.dtype != Dtype::F16 && spec.dtype != Dtype::Bf16 {
                 // GGUF with BF16 activations fails. F32 activations, as in
                 // Fornace with quantized weights.
@@ -308,6 +319,7 @@ mod tests {
             device: DeviceKind::Metal,
             cache_prompt: false,
             max_batch: None,
+            mistralrs_paged: false,
         }
     }
 
@@ -345,6 +357,11 @@ mod tests {
         );
         let a = args(&command(&spec(ServerEngine::MistralRs, Dtype::F16)).unwrap()).join(" ");
         assert!(a.ends_with("-m /m") && !a.contains("--dtype"), "{a}");
+        let mut paged = spec(ServerEngine::MistralRs, Dtype::Q4);
+        paged.mistralrs_paged = true;
+        let a = args(&command(&paged).unwrap()).join(" ");
+        assert!(a.contains("--max-seqs 8 --kv-cache 32768tokens"), "{a}");
+        assert!(!a.contains("--paged-attn"), "{a}");
         assert!(command(&spec(ServerEngine::MistralRs, Dtype::F32)).is_err());
     }
 
