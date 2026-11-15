@@ -12,7 +12,9 @@ example: "A KV cache makes decode 6x faster on an M4 and costs 1.2 GB at 8k
 context". The full list is in [results/README.md](results/README.md). The
 three newest results are below.
 
-No results yet.
+- [A scheduler cuts the slowest first token of 8 agent requests to Qwen2 on Metal from 8.3 s to 0.9 s, and doubles the tokens per second at BF16](results/2026-11-13-scheduler-qwen2-metal.md)
+- [With 8 requests at once from one agent, llama.cpp gives 2.5× the tokens per second of Fornace on Metal; with one request, it is only 1.1× faster](results/2026-11-13-comparison-qwen2-metal.md)
+- [A 0.5B draft makes Qwen2.5-1.5B decode 1.35× faster on code and 38 % slower on prose on Metal](results/2026-11-12-speculative-decoding-qwen2-metal.md)
 
 ## Crates
 

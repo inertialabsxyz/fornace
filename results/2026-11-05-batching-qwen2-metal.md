@@ -1,5 +1,7 @@
 # Batch 4 gives 1.6× the total decode speed of batch 1 for Qwen2 on Metal, but each sequence decodes at 0.40×
 
+> **Note, 15 November 2026.** This result measured copies of one prompt with no scheduler; for an agent that sends different requests at once, a server with a batch gives 2.1× the tokens per second at BF16 and cuts the slowest first token from 8.3 s to 0.9 s (see [the scheduler result](2026-11-13-scheduler-qwen2-metal.md)).
+
 ## Why it matters
 
 One user on a laptop can have several sequences to run at the same time:

@@ -1,5 +1,7 @@
 # Prefilling a shared system prompt once cuts the time to first token of 4 Qwen2 sequences 2.7× on Metal, and a paged KV cache is not needed for it
 
+> **Note, 15 November 2026.** This result measured one user with copies of one system prompt and no scheduler; for an agent that sends several requests at once, a server with a batch and a cache for each request is the larger gain (see [the scheduler result](2026-11-13-scheduler-qwen2-metal.md)).
+
 ## Why it matters
 
 Servers use a paged KV cache. It keeps keys and values in fixed-size
