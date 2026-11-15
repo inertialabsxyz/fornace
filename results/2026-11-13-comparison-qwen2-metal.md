@@ -380,11 +380,24 @@ M=./models/qwen2.5-0.5b-instruct; P=bench/prompts
 # Case A
 fb --model $M --engines fornace,mistralrs,llamacpp --dtypes f16,q8,q4 \
    --prompts $P/alice-512.txt --requests 3
+# Case B
+fb --model $M --engines fornace,mistralrs,llamacpp --dtypes f16,q4 \
+   --prompts $P/alice-128.txt,$P/alice-2048.txt --requests 3
+# Case C: Fornace in the process and over HTTP, penalty 1.0 and 1.1
+fc() { target/release/fornace-bench --model $M --transport http,process \
+         --attention fused --engines fornace --dtypes f16,q4 \
+         --prompts $P/alice-512.txt --requests 3 --repeats 3 --warmup 1 \
+         --out bench/runs/repro-compare.csv "$@"; }
+fc --repeat-penalty 1.0; fc --repeat-penalty 1.1
+fc --repeat-penalty 1.1; fc --repeat-penalty 1.0
 # Case D (mistral.rs at f16 only)
 fb --model $M --load agent --concurrency 1,2,4,8 --parallel 8 \
    --engines fornace,llamacpp --dtypes f16,q4
 fb --model $M --load agent --concurrency 1,2,4,8 --parallel 8 \
    --engines mistralrs --dtypes f16
+# Case D, llama.cpp with its prompt caches on
+fb --model $M --load agent --concurrency 4 --parallel 8 \
+   --engines llamacpp --dtypes q4,f16 --cache-prompt
 # Case E
 fb --model ./models/qwen2.5-1.5b-instruct --engines fornace,mistralrs,llamacpp \
    --dtypes f16,q4 --prompts $P/alice-512.txt --requests 3

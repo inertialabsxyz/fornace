@@ -260,6 +260,13 @@ fb --engines fornace --dtypes f16,q4 --max-batch 1      # the queue
 fb --engines fornace --dtypes f16,q4                    # the scheduler
 fb --engines llamacpp --dtypes f16,q4
 MISTRALRS_TAG=v0.9.5-xcode fb --engines mistralrs --mistralrs-paged --dtypes f16
+fb --engines mistralrs --dtypes f16                     # mistral.rs, paged attention off
+# One request (C = 1): the scheduler and the queue, ABBA
+fa() { target/release/fornace-bench --model ./models/qwen2.5-0.5b-instruct \
+         --transport http --attention fused --repeat-penalty 1.0 \
+         --engines fornace --dtypes f16,q8,q4 --prompts bench/prompts/alice-512.txt \
+         --requests 3 --out bench/runs/repro-scheduler.csv "$@"; }
+fa; fa --max-batch 1; fa --max-batch 1; fa
 ```
 
 `--dtypes f16` gives `bf16` on Metal. The summary at the end of each
