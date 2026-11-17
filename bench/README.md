@@ -296,6 +296,40 @@ one forward pass of K + 1 tokens. Greedy sampling only.
   later guesses are not checked, so they are not in `tested`. Do not use
   `accepted` / (`rounds` × K).
 
+## The matmul timers
+
+Three timers measure one matmul at the decode shapes of Qwen2.5-0.5B and
+Qwen2.5-1.5B (Q, K and V, O, gate and up, down, `lm_head`), at M = 1, 2, 4,
+8, 16 rows. The weights are random. All three use the same rules and write
+the same CSV columns:
+
+| Timer | Engine | Formats | Run |
+|---|---|---|---|
+| `crates/fornace-engine/tests/matmul_op_cost.rs` | Candle (the Fornace fork) | `bf16`, Q8_0, Q4_0 | `cargo test --release --features metal -p fornace-engine --test matmul_op_cost -- --ignored --nocapture --test-threads=1`, with `FORNACE_OP_COST_OUT=<file>` |
+| `bench/ref/mlx_matmul_cost.py` | MLX | `bf16` | `bench/ref/run.sh <out-prefix>` |
+| `bench/ref/ggml_matmul_cost.cpp` | ggml (llama.cpp) | Q8_0, Q4_0 | `bench/ref/run.sh <out-prefix>` |
+
+- `hot`: the same weights for each op, as `test-backend-ops perf` does.
+  The weights of a small matrix can stay in the GPU cache, so `hot` can
+  be above the roofline.
+- `cold`: a ring of copies of the weights, 256 MiB or more, so each op
+  reads its weights from memory, as a decode step does. Compare `cold`
+  rows.
+- One sample queues 32 to 256 ops (enough to read 2 GiB of weights), then
+  waits for the GPU. `median_us` is the median of 100 samples, after 10
+  warm-up samples, divided by the ops in a sample. For a small matrix this
+  can be the time to encode the launch on the CPU, not the kernel time.
+- `layout`: `linear` (dense, `[M, 1, K]` through `Linear`), `batch_axis`
+  (`[M, 1, K]`, one matrix-vector launch for each row in Candle), or
+  `m_axis` (`[M, K]`, one launch).
+- `roofline_us`: the bytes of the weights, the input, and the output at
+  273 GB/s. `roofline_pct`: `roofline_us` / `median_us`.
+
+`bench/ref/run.sh` also runs the ggml timer with
+`GGML_METAL_CONCURRENCY_DISABLE=1`, and `test-backend-ops perf` on four
+shapes as a check of the ggml timer in `hot` mode. It needs mlx and the
+`test-backend-ops` build of `scripts/get-reference-engines.sh --install`.
+
 ## Runs
 
 Commit one CSV file for each run to `bench/runs/`. Each result gives the
