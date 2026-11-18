@@ -150,6 +150,8 @@ async fn handle(s: AppState, kind: Kind, req: api::Request) -> Response {
             max_new_tokens,
             ignore_eos: params.ignore_eos,
             repeat_penalty: params.repeat_penalty.unwrap_or(s.config.repeat_penalty),
+            temperature: None,
+            seed: fornace_engine::DEFAULT_SEED,
         },
         stop: params.stop,
         out,

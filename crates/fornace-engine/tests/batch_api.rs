@@ -49,6 +49,8 @@ fn options(max_new_tokens: usize, ignore_eos: bool) -> GenerateOptions {
         max_new_tokens,
         ignore_eos,
         repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
+        temperature: None,
+        seed: fornace_engine::DEFAULT_SEED,
     }
 }
 

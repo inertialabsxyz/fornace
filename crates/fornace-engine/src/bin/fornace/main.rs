@@ -4,13 +4,14 @@ mod plot;
 mod trace;
 
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{ArgAction, Parser, ValueEnum};
 use fornace_engine::{
-    AttentionKind, DEFAULT_BLOCK_SIZE, DeviceKind, DraftConfig, Dtype, Engine, KvCacheKind,
-    LoadConfig,
+    AttentionKind, DEFAULT_BLOCK_SIZE, DEFAULT_SEED, DeviceKind, DraftConfig, Dtype, Engine,
+    GenerateOptions, KvCacheKind, LoadConfig,
 };
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
@@ -77,6 +78,14 @@ struct Args {
     /// --max-new-tokens tokens.
     #[arg(long)]
     ignore_eos: bool,
+    /// Sample from all tokens at this temperature, above 0. Without it,
+    /// the engine selects the token with the highest logit. Needs --batch 1
+    /// and no --draft-model.
+    #[arg(long, value_name = "T", value_parser = positive, conflicts_with = "draft_model")]
+    temperature: Option<f64>,
+    /// The seed of the sampler for --temperature.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_SEED, requires = "temperature")]
+    seed: u64,
     /// A draft model for speculative decoding: the directory of a model
     /// with the same tokenizer. It guesses --spec-k tokens, and --model
     /// checks them in one forward pass. Needs --batch 1 and --kv-cache
@@ -158,9 +167,21 @@ fn main() -> anyhow::Result<()> {
             k: args.spec_k.get(),
         }),
     };
+    if args.temperature.is_some() && config.batch != 1 {
+        anyhow::bail!("--temperature needs --batch 1");
+    }
     let mut engine = Engine::load(&config)?;
-    let prompts = vec![args.prompt.as_str(); config.batch];
-    let report = engine.generate_batch(&prompts)?;
+    let report = if args.temperature.is_some() {
+        let options = GenerateOptions {
+            temperature: args.temperature,
+            seed: args.seed,
+            ..GenerateOptions::from(&config)
+        };
+        engine.generate_stream(&args.prompt, &options, &mut |_| ControlFlow::Continue(()))?
+    } else {
+        let prompts = vec![args.prompt.as_str(); config.batch];
+        engine.generate_batch(&prompts)?
+    };
     if let Some(path) = &args.out {
         let json = serde_json::to_string_pretty(&report)?;
         std::fs::write(path, json).with_context(|| format!("cannot write {}", path.display()))?;
@@ -230,6 +251,13 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn positive(value: &str) -> Result<f64, String> {
+    match value.parse::<f64>() {
+        Ok(t) if t > 0.0 && t.is_finite() => Ok(t),
+        _ => Err(format!("{value} is not a number above 0")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +323,22 @@ mod tests {
         assert!(Args::try_parse_from(BASE.iter().chain(&["--draft-dtype", "q4"])).is_err());
         let zero = ["--draft-model", "d", "--spec-k", "0"];
         assert!(Args::try_parse_from(BASE.iter().chain(&zero)).is_err());
+    }
+
+    #[test]
+    fn temperature_and_seed_parse() {
+        let args = Args::try_parse_from(BASE).unwrap();
+        assert_eq!(args.temperature, None);
+        assert_eq!(args.seed, DEFAULT_SEED);
+        let flags = ["--temperature", "0.7", "--seed", "3"];
+        let args = Args::try_parse_from(BASE.iter().chain(&flags)).unwrap();
+        assert_eq!(args.temperature, Some(0.7));
+        assert_eq!(args.seed, 3);
+        assert!(Args::try_parse_from(BASE.iter().chain(&["--seed", "3"])).is_err());
+        assert!(Args::try_parse_from(BASE.iter().chain(&["--temperature", "0"])).is_err());
+        assert!(Args::try_parse_from(BASE.iter().chain(&["--temperature", "-1"])).is_err());
+        let draft = ["--temperature", "0.7", "--draft-model", "d"];
+        assert!(Args::try_parse_from(BASE.iter().chain(&draft)).is_err());
     }
 
     #[test]

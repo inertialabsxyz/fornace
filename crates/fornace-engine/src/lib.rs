@@ -241,6 +241,25 @@ pub struct GenerateOptions {
     pub max_new_tokens: usize,
     pub ignore_eos: bool,
     pub repeat_penalty: f32,
+    /// `None` selects the token with the highest logit. `Some(t)` samples
+    /// from all tokens at temperature `t`, which must be above 0.
+    pub temperature: Option<f64>,
+    /// The seed of the sampler. Greedy sampling does not use it.
+    pub seed: u64,
+}
+
+/// The seed of the sampler of [`LoadConfig`], and of all results before
+/// the seed became an option.
+pub const DEFAULT_SEED: u64 = 42;
+
+impl GenerateOptions {
+    fn sampler(&self) -> LogitsProcessor {
+        let sampling = match self.temperature {
+            None => Sampling::ArgMax,
+            Some(temperature) => Sampling::All { temperature },
+        };
+        LogitsProcessor::from_sampling(self.seed, sampling)
+    }
 }
 
 impl From<&LoadConfig> for GenerateOptions {
@@ -249,6 +268,8 @@ impl From<&LoadConfig> for GenerateOptions {
             max_new_tokens: config.max_new_tokens,
             ignore_eos: config.ignore_eos,
             repeat_penalty: config.repeat_penalty,
+            temperature: None,
+            seed: DEFAULT_SEED,
         }
     }
 }
@@ -669,9 +690,7 @@ impl Engine {
             self.tokenizer.token_to_id("<|endoftext|>"),
         ];
 
-        let mut samplers: Vec<_> = (0..batch)
-            .map(|_| LogitsProcessor::from_sampling(42, Sampling::ArgMax))
-            .collect();
+        let mut samplers: Vec<_> = (0..batch).map(|_| options.sampler()).collect();
         // #2 Prefill
         let prefill = device_span!(
             &self.device,

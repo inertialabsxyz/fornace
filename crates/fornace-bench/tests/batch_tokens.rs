@@ -71,6 +71,8 @@ fn options(max_tokens: usize) -> GenerateOptions {
         max_new_tokens: max_tokens,
         ignore_eos: true,
         repeat_penalty: 1.0,
+        temperature: None,
+        seed: fornace_engine::DEFAULT_SEED,
     }
 }
 

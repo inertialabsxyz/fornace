@@ -176,6 +176,8 @@ fn stream_events_equal_the_report_and_generate() {
         max_new_tokens: 32,
         ignore_eos: true,
         repeat_penalty: fornace_engine::DEFAULT_REPEAT_PENALTY,
+        temperature: None,
+        seed: fornace_engine::DEFAULT_SEED,
     };
     let mut ids = Vec::new();
     let mut text = String::new();
@@ -215,6 +217,8 @@ fn stream_break_after_five_tokens_gives_five_tokens() {
         max_new_tokens: 32,
         ignore_eos: true,
         repeat_penalty: 1.0,
+        temperature: None,
+        seed: fornace_engine::DEFAULT_SEED,
     };
     let mut events = 0;
     let report = engine
@@ -243,6 +247,8 @@ fn stream_options_set_the_token_count() {
         max_new_tokens: 7,
         ignore_eos: true,
         repeat_penalty: 1.0,
+        temperature: None,
+        seed: fornace_engine::DEFAULT_SEED,
     };
     let report = engine
         .generate_stream(STREAM_PROMPT, &options, &mut |_| ControlFlow::Continue(()))
