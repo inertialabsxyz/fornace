@@ -5,7 +5,7 @@
 //! on a quiet machine with:
 //!
 //! ```sh
-//! FORNACE_OP_COST_OUT=bench/runs/<file>.csv \
+//! FORNACE_OP_COST_OUT=$PWD/bench/runs/<file>.csv \
 //! cargo test --release --features metal -p fornace-engine \
 //!     --test matmul_op_cost -- --ignored --nocapture --test-threads=1
 //! ```
@@ -37,7 +37,8 @@
 //!
 //! Environment variables:
 //!
-//! - `FORNACE_OP_COST_OUT`: also write the CSV to this file.
+//! - `FORNACE_OP_COST_OUT`: also write the CSV to this file. Give an
+//!   absolute path: the test runs in the folder of its crate.
 //! - `FORNACE_OP_COST_SAMPLES`: the number of samples (default 100). Use a
 //!   small number for a quick check of the test itself.
 //! - `FORNACE_OP_COST_MODELS`: a comma list, for example `0.5b`.

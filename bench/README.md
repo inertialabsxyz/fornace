@@ -305,7 +305,7 @@ the same CSV columns:
 
 | Timer | Engine | Formats | Run |
 |---|---|---|---|
-| `crates/fornace-engine/tests/matmul_op_cost.rs` | Candle (the Fornace fork) | `bf16`, Q8_0, Q4_0 | `cargo test --release --features metal -p fornace-engine --test matmul_op_cost -- --ignored --nocapture --test-threads=1`, with `FORNACE_OP_COST_OUT=<file>` |
+| `crates/fornace-engine/tests/matmul_op_cost.rs` | Candle (the Fornace fork) | `bf16`, Q8_0, Q4_0 | `cargo test --release --features metal -p fornace-engine --test matmul_op_cost -- --ignored --nocapture --test-threads=1`, with `FORNACE_OP_COST_OUT=<absolute path>` |
 | `bench/ref/mlx_matmul_cost.py` | MLX | `bf16` | `bench/ref/run.sh <out-prefix>` |
 | `bench/ref/ggml_matmul_cost.cpp` | ggml (llama.cpp) | Q8_0, Q4_0 | `bench/ref/run.sh <out-prefix>` |
 
