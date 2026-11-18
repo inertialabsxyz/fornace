@@ -1,0 +1,4 @@
+# Recorded 2026-11-17T18:13Z by bench/ref/run.sh
+mlx: 0.32.4
+llama.cpp: v0.9.0 (cd959ba)
+machine: Apple M4 Pro, macOS 27.2.1
