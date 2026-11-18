@@ -274,6 +274,17 @@ impl From<&LoadConfig> for GenerateOptions {
     }
 }
 
+/// Reads and changes the logits of each token of
+/// [`Engine::generate_stream_with_hook`]. `step` is the index of the token
+/// in the generated tokens: 0 is the first token, from the prefill.
+pub trait LogitsHook {
+    /// Called after the repeat penalty and before the sampler, for each
+    /// token, the first token of the prefill also.
+    fn on_logits(&mut self, step: usize, logits: &mut [f32]);
+    /// Called after the sampler selects a token, EOS also.
+    fn on_token(&mut self, step: usize, token: u32);
+}
+
 /// One new token of [`Engine::generate_stream`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenEvent {
@@ -605,13 +616,13 @@ impl Engine {
                 .collect::<Result<Vec<_>>>()?
         };
         let options = GenerateOptions::from(&self.load_config);
-        self.generate_rows(&rows, start, &options, None)
+        self.generate_rows(&rows, start, &options, None, None)
     }
 
     /// [`Engine::generate_batch`] with token ids in place of text.
     pub fn generate_tokens(&mut self, rows: &[Vec<u32>]) -> Result<GenerationReport> {
         let options = GenerateOptions::from(&self.load_config);
-        self.generate_rows(rows, Instant::now(), &options, None)
+        self.generate_rows(rows, Instant::now(), &options, None, None)
     }
 
     /// Generates text that continues `prompt`, one sequence, and calls
@@ -629,6 +640,30 @@ impl Engine {
         options: &GenerateOptions,
         on_token: &mut dyn FnMut(TokenEvent) -> ControlFlow<()>,
     ) -> Result<GenerationReport> {
+        self.stream(prompt, options, None, on_token)
+    }
+
+    /// [`Engine::generate_stream`] with a [`LogitsHook`]. For each token,
+    /// the order is: forward pass, repeat penalty, `hook.on_logits`, sampler,
+    /// `hook.on_token`, EOS check, `on_token`. The logits go to the CPU once
+    /// for each token, and the sampler reads the changed logits there.
+    pub fn generate_stream_with_hook(
+        &mut self,
+        prompt: &str,
+        options: &GenerateOptions,
+        hook: &mut dyn LogitsHook,
+        on_token: &mut dyn FnMut(TokenEvent) -> ControlFlow<()>,
+    ) -> Result<GenerationReport> {
+        self.stream(prompt, options, Some(hook), on_token)
+    }
+
+    fn stream(
+        &mut self,
+        prompt: &str,
+        options: &GenerateOptions,
+        hook: Option<&mut dyn LogitsHook>,
+        on_token: &mut dyn FnMut(TokenEvent) -> ControlFlow<()>,
+    ) -> Result<GenerationReport> {
         if self.draft.is_some() {
             return Err(Error::StreamWithDraft);
         }
@@ -637,7 +672,7 @@ impl Engine {
             let _span = tracing::info_span!("tokenize").entered();
             self.tokenize(prompt)?
         };
-        self.generate_rows(&[row], start, options, Some(on_token))
+        self.generate_rows(&[row], start, options, Some(on_token), hook)
     }
 
     fn generate_rows(
@@ -646,12 +681,14 @@ impl Engine {
         start: Instant,
         options: &GenerateOptions,
         mut on_token: Option<&mut dyn FnMut(TokenEvent) -> ControlFlow<()>>,
+        mut hook: Option<&mut dyn LogitsHook>,
     ) -> Result<GenerationReport> {
         if rows.is_empty() {
             return Err(Error::EmptyBatch);
         }
         let batch = rows.len();
         debug_assert!(on_token.is_none() || batch == 1, "streaming is batch 1");
+        debug_assert!(hook.is_none() || batch == 1, "a hook is batch 1");
         if self.draft.is_some() {
             if batch != 1 {
                 return Err(Error::DraftNeedsBatchOne(batch));
@@ -733,11 +770,21 @@ impl Engine {
 
         let mut next = {
             let _span = device_span!(&self.device, sync, "sample")?;
-            samplers
-                .iter_mut()
-                .enumerate()
-                .map(|(b, sampler)| sampler.sample(&logits.get(if one_row { 0 } else { b })?))
-                .collect::<candle_core::Result<Vec<u32>>>()?
+            match hook.as_mut() {
+                // The first token has no repeat penalty.
+                Some(hook) => vec![sample_with_hook(
+                    &mut samplers[0],
+                    &logits.get(0)?,
+                    &[],
+                    1.0,
+                    &mut **hook,
+                )?],
+                None => samplers
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(b, sampler)| sampler.sample(&logits.get(if one_row { 0 } else { b })?))
+                    .collect::<candle_core::Result<Vec<u32>>>()?,
+            }
         };
         drop(prefill);
         let first_token = start.elapsed();
@@ -773,14 +820,28 @@ impl Engine {
             // #5 Sample each row with the repeat penalty of its own tokens
             next = {
                 let _span = device_span!(&self.device, sync, "sample")?;
-                samplers
-                    .iter_mut()
-                    .zip(&generated)
-                    .enumerate()
-                    .map(|(b, (sampler, row))| {
-                        sample_with_penalty(sampler, &logits.get(b)?, row, options.repeat_penalty)
-                    })
-                    .collect::<candle_core::Result<Vec<u32>>>()?
+                match hook.as_mut() {
+                    Some(hook) => vec![sample_with_hook(
+                        &mut samplers[0],
+                        &logits.get(0)?,
+                        &generated[0],
+                        options.repeat_penalty,
+                        &mut **hook,
+                    )?],
+                    None => samplers
+                        .iter_mut()
+                        .zip(&generated)
+                        .enumerate()
+                        .map(|(b, (sampler, row))| {
+                            sample_with_penalty(
+                                sampler,
+                                &logits.get(b)?,
+                                row,
+                                options.repeat_penalty,
+                            )
+                        })
+                        .collect::<candle_core::Result<Vec<u32>>>()?,
+                }
             };
             decode_token_ms.push(step.elapsed().as_secs_f64() * 1e3);
             // #6 A row samples EOS, stop the batch
@@ -1075,6 +1136,31 @@ fn sample_with_penalty(
     let logits =
         candle_transformers::utils::apply_repeat_penalty(logits, penalty, &context[start..])?;
     sampler.sample(&logits)
+}
+
+/// [`sample_with_penalty`] with a hook between the penalty and the sampler.
+/// The step of the token is the length of `context`. The logits go to the
+/// CPU once, and the sampler reads them there.
+fn sample_with_hook(
+    sampler: &mut LogitsProcessor,
+    logits: &Tensor,
+    context: &[u32],
+    penalty: f32,
+    hook: &mut dyn LogitsHook,
+) -> candle_core::Result<u32> {
+    let step = context.len();
+    let mut values = if penalty == 1.0 {
+        logits.to_vec1::<f32>()?
+    } else {
+        let start = context.len().saturating_sub(REPEAT_LAST_N);
+        candle_transformers::utils::apply_repeat_penalty(logits, penalty, &context[start..])?
+            .to_vec1::<f32>()?
+    };
+    hook.on_logits(step, &mut values);
+    let len = values.len();
+    let token = sampler.sample(&Tensor::from_vec(values, len, &Device::Cpu)?)?;
+    hook.on_token(step, token);
+    Ok(token)
 }
 
 /// Gives `on_token` the last token of `generated` and its new text. Returns
