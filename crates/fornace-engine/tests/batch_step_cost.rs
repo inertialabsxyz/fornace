@@ -14,10 +14,10 @@
 //! attention. Each step reads the next token of each row back to the CPU,
 //! as a real step does.
 //!
-//! Two layouts for the quantized matmuls: the rows on the batch axis
-//! (`[B, 1, K]`, one matrix-vector launch for each row, as today) and the
-//! rows on the M axis (`[B, K]`, one matmul launch). Dense weights always
-//! use the M axis. The test also compares the logits of the two layouts.
+//! The quantized matmuls take the input as `[B, 1, K]`: Candle sends 2 or 3
+//! rows to its mat-vec kernel in one launch and 4 or more rows to its tile
+//! kernel. Dense weights use one `[B, K]` matmul. (Until `deca28f`, the test
+//! also timed `[B, K]` for the quantized matmuls, then the matmul kernel.)
 //!
 //! Then it times the attention part alone: 24 layers of one fused attention
 //! launch for B rows, against B launches of one row each, with each row in
@@ -25,7 +25,7 @@
 //!
 //! `row_caches_step_cost` times the same steps with one cache for each row
 //! (`forward_rows`, the path of the scheduler), against one cache for the
-//! batch, with the M-axis thresholds of `m_axis_rows`.
+//! batch.
 
 #![cfg(feature = "metal")]
 
@@ -162,18 +162,7 @@ fn run_rows(model: &mut ModelForCausalLM, ids: &[u32], rows: usize, device: &Dev
     start.elapsed().as_secs_f64() * 1e3 / TIMED as f64
 }
 
-/// The fewest rows that go on the M axis, from the first run of
-/// `batch_step_cost` at `aa23bc8`: the crossover points.
-fn m_axis_rows(format: Dtype) -> usize {
-    match format {
-        Dtype::Q8 => 5,
-        Dtype::Q4 => 7,
-        _ => usize::MAX,
-    }
-}
-
-/// The step with one cache for each row, against one cache for the batch,
-/// with the M-axis thresholds.
+/// The step with one cache for each row, against one cache for the batch.
 #[test]
 #[ignore = "a measurement on Metal with the model"]
 fn row_caches_step_cost() {
@@ -194,7 +183,6 @@ fn row_caches_step_cost() {
         let Some(mut model) = load(&dir, &config, format, &device) else {
             continue;
         };
-        model.set_quantized_m_axis_rows(m_axis_rows(format));
         let name = if format == Dtype::F16 {
             "bf16".to_string()
         } else {
@@ -225,10 +213,8 @@ fn batch_step_cost() {
         serde_json::from_slice(&std::fs::read(dir.join("config.json")).unwrap()).unwrap();
     let ids = prompt(&dir);
     println!("prompt tokens: {}", ids.len());
-    println!(
-        "| Format | B | Layout | Step ms | Step / step at B = 1 | Total tok/s | Logits max diff | Same top tokens |"
-    );
-    println!("|---|---:|---|---:|---:|---:|---:|---|");
+    println!("| Format | B | Step ms | Step / step at B = 1 | Total tok/s |");
+    println!("|---|---:|---:|---:|---:|");
     for format in [Dtype::F16, Dtype::Q8, Dtype::Q4] {
         let Some(mut model) = load(&dir, &config, format, &device) else {
             eprintln!("skipped: no {format} file");
@@ -239,50 +225,16 @@ fn batch_step_cost() {
         } else {
             format.to_string()
         };
-        let layouts: &[bool] = if format == Dtype::F16 {
-            &[false]
-        } else {
-            &[false, true]
-        };
         let mut base = None;
         for &rows in &ROWS {
-            let mut batch_axis = None;
-            for &on_m in layouts {
-                model.set_quantized_rows_on_m(on_m);
-                let (logits, ms) = run(&mut model, &ids, rows, &device);
-                let base_ms = *base.get_or_insert(ms);
-                let layout = match (format, on_m) {
-                    (Dtype::F16, _) => "dense (M axis)",
-                    (_, false) => "batch axis",
-                    (_, true) => "M axis",
-                };
-                let (diff, same) = match &batch_axis {
-                    None => (String::from("—"), String::from("—")),
-                    Some(reference) => {
-                        let d: f32 = (&logits - reference)
-                            .unwrap()
-                            .abs()
-                            .unwrap()
-                            .max_all()
-                            .unwrap()
-                            .to_scalar()
-                            .unwrap();
-                        let a: Vec<u32> = logits.argmax(D::Minus1).unwrap().to_vec1().unwrap();
-                        let b: Vec<u32> = reference.argmax(D::Minus1).unwrap().to_vec1().unwrap();
-                        (format!("{d:.2e}"), (a == b).to_string())
-                    }
-                };
-                println!(
-                    "| {name} | {rows} | {layout} | {ms:.3} | {:.2}× | {:.1} | {diff} | {same} |",
-                    ms / base_ms,
-                    rows as f64 * 1e3 / ms
-                );
-                if !on_m {
-                    batch_axis = Some(logits);
-                }
-            }
+            let (_, ms) = run(&mut model, &ids, rows, &device);
+            let base_ms = *base.get_or_insert(ms);
+            println!(
+                "| {name} | {rows} | {ms:.3} | {:.2}× | {:.1} |",
+                ms / base_ms,
+                rows as f64 * 1e3 / ms
+            );
         }
-        model.set_quantized_rows_on_m(false);
     }
 }
 

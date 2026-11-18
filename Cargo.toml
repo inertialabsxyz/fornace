@@ -32,15 +32,19 @@ tokio-stream = "0.1.19"
 futures-util = "0.3.34"
 ureq = "3.5.2"
 
-# Candle 0.11.0 with three changes (fork branch fornace/kv-cache-truncate):
+# Candle 0.11.0 with five changes (fork branch fornace/qmatmul-tile):
 # - The Metal buffer pool does not reuse a buffer larger than 2 × the rounded
 #   request. Without it, a long prefill with the cat-contiguous KV cache holds
 #   one score buffer for each layer (upstream PR 3851).
 # - `KvCache::truncate`, the rollback of speculative decoding.
 # - The causal mask of the Metal `sdpa` full kernel with fewer queries than
 #   keys (upstream PR 4062). Without it, a verify pass can see later keys.
-# Remove this patch when upstream Candle has all three.
+# - One mat-vec launch for 2 to 8 rows of a quantized matmul (upstream PR
+#   3898), not one launch for each row.
+# - A tile kernel for the Q4_0 and Q8_0 matmul with 4 to 16 rows, which reads
+#   each weight block once for up to 8 rows (a decode step of a batch).
+# Remove this patch when upstream Candle has all five.
 [patch.crates-io]
-candle-core = { git = "https://github.com/inertialabsxyz/candle", rev = "b4090fe1c5ded2f5c80f09b920eb7aac37f3519d" }
-candle-nn = { git = "https://github.com/inertialabsxyz/candle", rev = "b4090fe1c5ded2f5c80f09b920eb7aac37f3519d" }
-candle-metal-kernels = { git = "https://github.com/inertialabsxyz/candle", rev = "b4090fe1c5ded2f5c80f09b920eb7aac37f3519d" }
+candle-core = { git = "https://github.com/inertialabsxyz/candle", rev = "e8540dbb51bdbc3e25e47d21aba5977eaf4cb864" }
+candle-nn = { git = "https://github.com/inertialabsxyz/candle", rev = "e8540dbb51bdbc3e25e47d21aba5977eaf4cb864" }
+candle-metal-kernels = { git = "https://github.com/inertialabsxyz/candle", rev = "e8540dbb51bdbc3e25e47d21aba5977eaf4cb864" }
