@@ -99,6 +99,13 @@ pub enum Error {
     DraftTokenizerMismatch,
     #[error("streaming does not support --draft-model")]
     StreamWithDraft,
+    #[error("cannot find model.safetensors or model.safetensors.index.json in {0}")]
+    WeightsMissing(PathBuf),
+    #[error("invalid {path}")]
+    WeightIndex {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     #[error("candle")]
     Candle(#[from] candle_core::Error),
 }
@@ -1071,6 +1078,40 @@ fn emit(
 const TOKENIZER_CHECK: &str =
     "The draft guesses, the target checks: 0123456789, `fn main() {}`, ünïcødé, 中文, Ελληνικά.";
 
+/// The safetensors files of the model in `model_dir`. A model with shard
+/// files has `model.safetensors.index.json`, and its `weight_map` gives the
+/// file of each tensor. The result has each shard one time, sorted. A model
+/// with one file has `model.safetensors`.
+pub fn weight_files(model_dir: &Path) -> Result<Vec<PathBuf>> {
+    #[derive(Deserialize)]
+    struct Index {
+        weight_map: std::collections::BTreeMap<String, String>,
+    }
+
+    let index = model_dir.join("model.safetensors.index.json");
+    if index.exists() {
+        let bytes = std::fs::read(&index).map_err(|source| Error::Read {
+            path: index.clone(),
+            source,
+        })?;
+        let parsed: Index =
+            serde_json::from_slice(&bytes).map_err(|source| Error::WeightIndex {
+                path: index,
+                source,
+            })?;
+        let files: std::collections::BTreeSet<String> = parsed.weight_map.into_values().collect();
+        if files.is_empty() {
+            return Err(Error::WeightsMissing(model_dir.to_path_buf()));
+        }
+        return Ok(files.into_iter().map(|f| model_dir.join(f)).collect());
+    }
+    let single = model_dir.join("model.safetensors");
+    if single.exists() {
+        return Ok(vec![single]);
+    }
+    Err(Error::WeightsMissing(model_dir.to_path_buf()))
+}
+
 /// Loads the model in `model_dir` with `dtype` weights on `device`. Returns
 /// the model, its config, and the format of the loaded weights: `Q8`, `Q4`,
 /// `Bf16`, or `F32`.
@@ -1113,16 +1154,16 @@ fn load_model(
                 _ if device.is_cpu() => DType::F32,
                 _ => DType::BF16,
             };
-            // One safetensors file that holds every weight tensor, by name.
-            let weights = model_dir.join("model.safetensors");
-            // VarBuilder maps the file into memory (mmap) and gives each layer
+            // One safetensors file, or the shard files of a larger model.
+            let weights = weight_files(model_dir)?;
+            // VarBuilder maps the files into memory (mmap) and gives each layer
             // its tensors by name, as `compute` on the device. No full read
             // happens here, so the load takes milliseconds. It is unsafe
-            // because mmap trusts that the file does not change while it is
+            // because mmap trusts that the files do not change while they are
             // mapped.
             let vb = {
                 let _span = device_span!(device, sync, "load.weights")?;
-                unsafe { VarBuilder::from_mmaped_safetensors(&[weights], compute, device)? }
+                unsafe { VarBuilder::from_mmaped_safetensors(&weights, compute, device)? }
             };
             // model.rs (a copy of Candle's Qwen2) builds the embedding, the
             // layers and the output head from those tensors.
@@ -1156,6 +1197,54 @@ fn common_prefix(rows: &[Vec<u32>]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new empty directory for one test, in the system temp directory.
+    fn empty_dir(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fornace-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn weight_files_gives_each_shard_of_the_index_once_sorted() {
+        let dir = empty_dir("weight-files-index");
+        let index = r#"{
+            "metadata": {"total_size": 0},
+            "weight_map": {
+                "lm_head.weight": "model-00003-of-00003.safetensors",
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "model.layers.0.mlp.up_proj.weight": "model-00002-of-00003.safetensors",
+                "model.layers.0.mlp.down_proj.weight": "model-00001-of-00003.safetensors"
+            }
+        }"#;
+        std::fs::write(dir.join("model.safetensors.index.json"), index).unwrap();
+        let files = weight_files(&dir).unwrap();
+        let expected: Vec<PathBuf> = (1..=3)
+            .map(|i| dir.join(format!("model-0000{i}-of-00003.safetensors")))
+            .collect();
+        assert_eq!(files, expected);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn weight_files_gives_the_one_file_without_an_index() {
+        let dir = empty_dir("weight-files-single");
+        std::fs::write(dir.join("model.safetensors"), b"").unwrap();
+        assert_eq!(
+            weight_files(&dir).unwrap(),
+            vec![dir.join("model.safetensors")]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn weight_files_names_the_directory_when_it_has_no_weights() {
+        let dir = empty_dir("weight-files-empty");
+        let err = weight_files(&dir).unwrap_err();
+        assert!(matches!(&err, Error::WeightsMissing(d) if d == &dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn dtype_round_trips_through_display_and_from_str() {
