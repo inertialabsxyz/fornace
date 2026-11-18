@@ -17,6 +17,8 @@
 //
 // Build: bench/ref/run.sh builds it against the llama.cpp clone.
 // Usage: ggml_matmul_cost [--samples N] [--models 0.5b,1.5b] [--out FILE]
+//        [--ops LIST] [--formats LIST] [--rows LIST] [--modes LIST]
+// The four lists run only those values, for example `--ops down --rows 8`.
 
 #include "ggml-backend.h"
 #include "ggml.h"
@@ -61,15 +63,29 @@ static std::vector<Shape> shapes(const std::string &model) {
 
 static size_t ceil_div(size_t a, size_t b) { return (a + b - 1) / b; }
 
+// True if `list` is empty or has `value` in its comma list.
+static bool only(const std::string &list, const std::string &value) {
+    if (list.empty()) return true;
+    return ("," + list + ",").find("," + value + ",") != std::string::npos;
+}
+
 int main(int argc, char **argv) {
     int samples = 100;
-    std::string models = "0.5b,1.5b";
+    std::string models = "0.5b,1.5b", ops, formats, rows, modes;
     FILE *out = nullptr;
     for (int i = 1; i + 1 < argc; i += 2) {
         if (!strcmp(argv[i], "--samples")) {
             samples = atoi(argv[i + 1]);
         } else if (!strcmp(argv[i], "--models")) {
             models = argv[i + 1];
+        } else if (!strcmp(argv[i], "--ops")) {
+            ops = argv[i + 1];
+        } else if (!strcmp(argv[i], "--formats")) {
+            formats = argv[i + 1];
+        } else if (!strcmp(argv[i], "--rows")) {
+            rows = argv[i + 1];
+        } else if (!strcmp(argv[i], "--modes")) {
+            modes = argv[i + 1];
         } else if (!strcmp(argv[i], "--out")) {
             out = fopen(argv[i + 1], "w");
         }
@@ -102,10 +118,12 @@ int main(int argc, char **argv) {
         start = end + 1;
 
         for (const Shape &s : shapes(model)) {
+            if (!only(ops, s.op)) continue;
             std::vector<float> w(size_t(s.n * s.k));
             for (float &v : w) v = normal(rng) * 0.02f;
 
             for (ggml_type type : {GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
+                if (!only(formats, type == GGML_TYPE_Q8_0 ? "q8_0" : "q4_0")) continue;
                 const size_t wb = ggml_row_size(type, s.k) * size_t(s.n);
                 const size_t copies = std::max<size_t>(2, ceil_div(COLD_BYTES, wb));
                 const size_t per_sample = std::clamp(ceil_div(SAMPLE_BYTES, wb), MIN_OPS, MAX_OPS);
@@ -122,12 +140,14 @@ int main(int argc, char **argv) {
                 for (auto *t : ws) ggml_backend_tensor_set(t, q.data(), 0, wb);
 
                 for (int m : ROWS) {
+                    if (!only(rows, std::to_string(m))) continue;
                     std::vector<float> xv(size_t(s.k * m));
                     for (float &v : xv) v = normal(rng);
                     const size_t nbytes = wb + size_t(m) * size_t(s.k + s.n) * 4;
                     const double roof = double(nbytes) / BANDWIDTH * 1e6;
 
                     for (const char *mode : {"hot", "cold"}) {
+                        if (!only(modes, mode)) continue;
                         const bool hot = !strcmp(mode, "hot");
                         const size_t ring = hot ? 1 : copies;
                         const size_t graphs = std::max<size_t>(1, ceil_div(ring, per_sample));

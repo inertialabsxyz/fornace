@@ -41,7 +41,10 @@
 //!   absolute path: the test runs in the folder of its crate.
 //! - `FORNACE_OP_COST_SAMPLES`: the number of samples (default 100). Use a
 //!   small number for a quick check of the test itself.
-//! - `FORNACE_OP_COST_MODELS`: a comma list, for example `0.5b`.
+//! - `FORNACE_OP_COST_MODELS`, `_OPS`, `_FORMATS`, `_LAYOUTS`, `_ROWS`,
+//!   `_MODES`: run only the values in this comma list, for example
+//!   `FORNACE_OP_COST_OPS=down` or `FORNACE_OP_COST_ROWS=1,8`. Use them to
+//!   record a Metal trace of one shape.
 
 #![cfg(feature = "metal")]
 
@@ -200,6 +203,15 @@ fn time(
     (at(0.5), at(0.1), at(0.9))
 }
 
+/// True if the comma list in the variable `FORNACE_OP_COST_<name>` has
+/// `value`, or if the variable is not set.
+fn only(name: &str, value: &str) -> bool {
+    match std::env::var(format!("FORNACE_OP_COST_{name}")) {
+        Ok(list) => list.split(',').any(|v| v == value),
+        Err(_) => true,
+    }
+}
+
 #[test]
 #[ignore = "a measurement: run it on a quiet machine"]
 fn matmul_op_cost() {
@@ -207,11 +219,6 @@ fn matmul_op_cost() {
     let samples: usize = std::env::var("FORNACE_OP_COST_SAMPLES")
         .map(|s| s.parse().unwrap())
         .unwrap_or(100);
-    let models: Vec<String> = std::env::var("FORNACE_OP_COST_MODELS")
-        .unwrap_or_else(|_| "0.5b,1.5b".into())
-        .split(',')
-        .map(str::to_owned)
-        .collect();
     let mut out = std::env::var("FORNACE_OP_COST_OUT")
         .ok()
         .map(|p| std::fs::File::create(p).unwrap());
@@ -227,10 +234,13 @@ fn matmul_op_cost() {
             .into(),
     );
 
-    for model in &models {
-        for s in shapes(model) {
+    for model in ["0.5b", "1.5b"].into_iter().filter(|m| only("MODELS", m)) {
+        for s in shapes(model).into_iter().filter(|s| only("OPS", s.op)) {
             let w = (Tensor::randn(0f32, 1.0, (s.n, s.k), &Device::Cpu).unwrap() * 0.02).unwrap();
-            for format in ["bf16", "q8_0", "q4_0"] {
+            for format in ["bf16", "q8_0", "q4_0"]
+                .into_iter()
+                .filter(|f| only("FORMATS", f))
+            {
                 let wb = weight_bytes(format, s.n, s.k);
                 let copies = COLD_BYTES.div_ceil(wb).max(2);
                 let cold = make_ops(format, &w, copies, &device);
@@ -240,8 +250,8 @@ fn matmul_op_cost() {
                 } else {
                     &["batch_axis", "m_axis"]
                 };
-                for &layout in layouts {
-                    for m in ROWS {
+                for &layout in layouts.iter().filter(|l| only("LAYOUTS", l)) {
+                    for m in ROWS.into_iter().filter(|m| only("ROWS", &m.to_string())) {
                         if m == 1 && layout == "m_axis" {
                             continue;
                         }
@@ -255,6 +265,9 @@ fn matmul_op_cost() {
                         let bytes = wb + m * (s.k + s.n) * act;
                         let roof = bytes as f64 / BANDWIDTH * 1e6;
                         for (mode, ops) in [("hot", &cold[..1]), ("cold", &cold[..])] {
+                            if !only("MODES", mode) {
+                                continue;
+                            }
                             let (med, p10, p90) = time(ops, &x, per_sample, samples, &device);
                             emit(format!(
                                 "{model},{},{},{},{},{format},{layout},{mode},{m},{per_sample},\
