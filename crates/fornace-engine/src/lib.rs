@@ -601,6 +601,30 @@ impl Engine {
             .map_err(Error::TokenEncoding)
     }
 
+    /// The bytes of each token ID, in ID order. Byte-level BPE tokens are
+    /// decoded to their real bytes. An added token, special or not, gives
+    /// its text. The list has the IDs of the tokenizer. The logits can be
+    /// longer: Qwen2.5 pads its vocabulary, and no token has those IDs.
+    pub fn token_bytes(&self) -> Vec<Vec<u8>> {
+        let added = self.tokenizer.get_added_tokens_decoder();
+        let char_bytes = byte_level_chars();
+        (0..self.tokenizer.get_vocab_size(true) as u32)
+            .map(|id| {
+                if let Some(token) = added.get(&id) {
+                    return token.content.as_bytes().to_vec();
+                }
+                let Some(token) = self.tokenizer.id_to_token(id) else {
+                    return Vec::new();
+                };
+                token
+                    .chars()
+                    .map(|c| char_bytes.get(&c).copied())
+                    .collect::<Option<Vec<u8>>>()
+                    .unwrap_or_else(|| token.into_bytes())
+            })
+            .collect()
+    }
+
     /// Generates text that continues each prompt, with all prompts in one
     /// batch. All prompts must have the same token count, because the batch
     /// has no padding. Each row has its own sampler and its own repeat
@@ -1138,6 +1162,24 @@ fn sample_with_penalty(
     sampler.sample(&logits)
 }
 
+/// The byte of each character of the byte-level BPE alphabet (GPT-2). The
+/// printable bytes are their own character. The other bytes are U+0100 and
+/// up, in byte order. `tokenizers` keeps its copy of this map private.
+fn byte_level_chars() -> std::collections::HashMap<char, u8> {
+    let printable = |b: u8| matches!(b, b'!'..=b'~' | 0xA1..=0xAC | 0xAE..=0xFF);
+    let mut next = 256u32;
+    (0..=255u8)
+        .map(|b| {
+            if printable(b) {
+                (char::from(b), b)
+            } else {
+                next += 1;
+                (char::from_u32(next - 1).expect("U+0100 to U+0143"), b)
+            }
+        })
+        .collect()
+}
+
 /// [`sample_with_penalty`] with a hook between the penalty and the sampler.
 /// The step of the token is the length of `context`. The logits go to the
 /// CPU once, and the sampler reads them there.
@@ -1301,6 +1343,23 @@ fn common_prefix(rows: &[Vec<u32>]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_byte_level_map_has_the_alphabet_of_tokenizers() {
+        let map = super::byte_level_chars();
+        let chars: std::collections::HashSet<char> = map.keys().copied().collect();
+        assert_eq!(
+            chars,
+            tokenizers::pre_tokenizers::byte_level::ByteLevel::alphabet()
+                .into_iter()
+                .collect()
+        );
+        let mut bytes: Vec<u8> = map.values().copied().collect();
+        bytes.sort_unstable();
+        assert_eq!(bytes, (0..=255).collect::<Vec<u8>>());
+        assert_eq!(map[&'Ġ'], b' ');
+        assert_eq!(map[&'Ċ'], b'\n');
+    }
+
     use super::*;
 
     /// A new empty directory for one test, in the system temp directory.
