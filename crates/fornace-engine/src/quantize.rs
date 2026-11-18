@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
+use candle_core::safetensors::MmapedSafetensors;
 use candle_core::{Device, Tensor};
 
 use crate::{Dtype, Error, Result};
@@ -36,28 +37,30 @@ pub fn gguf_path(model_dir: &Path, dtype: Dtype) -> Option<PathBuf> {
     Some(model_dir.join(name))
 }
 
-/// Quantizes each tensor: a rank-2 `*.weight` tensor to `dtype`, any other
-/// tensor to F32. Returns an error that names the tensor if its last
-/// dimension is not a multiple of the block size.
+/// Quantizes each tensor with [`quantize_tensor`].
 pub fn quantize_tensors(
     tensors: &[(String, Tensor)],
     dtype: GgmlDType,
 ) -> Result<Vec<(String, QTensor)>> {
     tensors
         .iter()
-        .map(|(name, tensor)| {
-            let target = if tensor.rank() == 2 && name.ends_with(".weight") {
-                dtype
-            } else {
-                GgmlDType::F32
-            };
-            let qtensor = QTensor::quantize(tensor, target).map_err(|source| Error::Quantize {
-                name: name.clone(),
-                source,
-            })?;
-            Ok((name.clone(), qtensor))
-        })
+        .map(|(name, tensor)| Ok((name.clone(), quantize_tensor(name, tensor, dtype)?)))
         .collect()
+}
+
+/// Quantizes one tensor: a rank-2 `*.weight` tensor to `dtype`, any other
+/// tensor to F32. Returns an error that names the tensor if its last
+/// dimension is not a multiple of the block size.
+pub fn quantize_tensor(name: &str, tensor: &Tensor, dtype: GgmlDType) -> Result<QTensor> {
+    let target = if tensor.rank() == 2 && name.ends_with(".weight") {
+        dtype
+    } else {
+        GgmlDType::F32
+    };
+    QTensor::quantize(tensor, target).map_err(|source| Error::Quantize {
+        name: name.to_string(),
+        source,
+    })
 }
 
 /// Writes the tensors to a GGUF file, with no metadata.
@@ -70,19 +73,36 @@ pub fn write_gguf<W: std::io::Seek + std::io::Write>(
     Ok(())
 }
 
-/// Reads `model.safetensors` in `model_dir`, quantizes it to `dtype` (`Q8`
-/// or `Q4`), and writes the file of [`gguf_path`]. Returns the path.
+/// Reads the weights in `model_dir` (one file or shard files, see
+/// [`crate::weight_files`]), quantizes them to `dtype` (`Q8` or `Q4`), and
+/// writes the file of [`gguf_path`]. Returns the path.
+///
+/// The files are mapped into memory, and one dense tensor at a time is
+/// read and quantized. Thus the peak is the quantized tensors plus one
+/// dense tensor, not the whole dense model as well.
 pub fn quantize_model(model_dir: &Path, dtype: Dtype) -> Result<PathBuf> {
     let (Some(ggml), Some(out)) = (ggml_dtype(dtype), gguf_path(model_dir, dtype)) else {
         return Err(Error::NotQuantized(dtype));
     };
-    let path = model_dir.join("model.safetensors");
-    let mut tensors: Vec<(String, Tensor)> = candle_core::safetensors::load(&path, &Device::Cpu)?
+    let files = crate::weight_files(model_dir)?;
+    // Unsafe because mmap trusts that the files do not change while they
+    // are mapped.
+    let weights = unsafe { MmapedSafetensors::multi(&files)? };
+    let mut names: Vec<String> = weights
+        .tensors()
         .into_iter()
+        .map(|(name, _)| name)
         .collect();
     // A fixed order gives the same file on each run.
-    tensors.sort_by(|a, b| a.0.cmp(&b.0));
-    let quantized = quantize_tensors(&tensors, ggml)?;
+    names.sort();
+    let quantized = names
+        .into_iter()
+        .map(|name| {
+            let tensor = weights.load(&name, &Device::Cpu)?;
+            let qtensor = quantize_tensor(&name, &tensor, ggml)?;
+            Ok((name, qtensor))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let file = std::fs::File::create(&out).map_err(|source| Error::Write {
         path: out.clone(),
         source,
