@@ -1191,11 +1191,14 @@ fn sample_with_hook(
     hook: &mut dyn LogitsHook,
 ) -> candle_core::Result<u32> {
     let step = context.len();
+    // The penalty gives its tensor back on the device of its input, so the
+    // copy to the CPU comes first.
+    let logits = logits.to_device(&Device::Cpu)?;
     let mut values = if penalty == 1.0 {
         logits.to_vec1::<f32>()?
     } else {
         let start = context.len().saturating_sub(REPEAT_LAST_N);
-        candle_transformers::utils::apply_repeat_penalty(logits, penalty, &context[start..])?
+        candle_transformers::utils::apply_repeat_penalty(&logits, penalty, &context[start..])?
             .to_vec1::<f32>()?
     };
     hook.on_logits(step, &mut values);
