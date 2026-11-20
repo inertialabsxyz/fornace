@@ -7,11 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// The largest amount of one `AUTHORIZE`, in cents.
 pub const MAX_AUTHORIZE: u64 = 1_000_000;
 
 /// The status of a payment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Authorized,
     Captured,
@@ -33,7 +36,7 @@ impl fmt::Display for Status {
 }
 
 /// One payment record.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Payment {
     pub status: Status,
     /// The authorized amount.
@@ -54,7 +57,7 @@ impl Payment {
 }
 
 /// The state of the ledger.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ledger {
     /// Account ID to balance.
     pub accounts: BTreeMap<String, u64>,
@@ -62,8 +65,10 @@ pub struct Ledger {
     pub payments: BTreeMap<String, Payment>,
 }
 
-/// One command of the model.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// One command of the model. The JSON form is the output format of the
+/// model, for example `{"cmd":"REFUND","payment":"p_17","amount":2500}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Command {
     Authorize {
         account: String,
@@ -248,7 +253,8 @@ impl Ledger {
 }
 
 /// One condition of a goal, on the state after the commands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Condition {
     /// The payment has this status.
     Status { payment: String, status: Status },
@@ -264,7 +270,7 @@ pub enum Condition {
 }
 
 /// A goal: all its conditions are true.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Goal {
     pub conditions: Vec<Condition>,
 }
@@ -321,9 +327,44 @@ impl Goal {
         amounts.remove(&0);
         amounts
     }
+
+    /// The payments and accounts that the goal names, for the reduced
+    /// search.
+    fn focus(&self, start: &Ledger) -> Focus {
+        let mut focus = Focus::default();
+        for condition in &self.conditions {
+            match condition {
+                Condition::Status { payment, .. }
+                | Condition::Captured { payment, .. }
+                | Condition::Refunded { payment, .. } => {
+                    focus.payments.insert(payment.clone());
+                    if let Some(p) = start.payments.get(payment) {
+                        focus.accounts.insert(p.account.clone());
+                    }
+                }
+                Condition::Balance { account, .. } => {
+                    focus.accounts.insert(account.clone());
+                }
+                Condition::NewPayment { account, amount } => {
+                    focus.accounts.insert(account.clone());
+                    focus.new_payments.insert((account.clone(), *amount));
+                }
+            }
+        }
+        focus
+    }
 }
 
-/// The money commands that the search tries in `state`: each command with
+/// The objects that a goal names.
+#[derive(Debug, Default)]
+struct Focus {
+    payments: BTreeSet<String>,
+    accounts: BTreeSet<String>,
+    /// The account and the amount of each `NewPayment` condition.
+    new_payments: BTreeSet<(String, u64)>,
+}
+
+/// The money commands that the full search tries in `state`: each command with
 /// each amount of `amounts`, and the amounts that `state` gives (the
 /// authorized amount of each authorized payment, and the refundable amount
 /// of each refundable payment). Only the permitted commands.
@@ -373,18 +414,121 @@ fn moves(state: &Ledger, amounts: &BTreeSet<u64>) -> Vec<Command> {
     moves
 }
 
+/// The money commands that the reduced search tries in `state`. They are
+/// the commands of [`moves`] that can change what the goal names:
+///
+/// - `CAPTURE`, `VOID`, and `REFUND` only on the payments that the goal
+///   names, and on the payments that are not in `start`.
+/// - `AUTHORIZE` only with the account and the amount of a `NewPayment`
+///   condition.
+/// - `TRANSFER` only to or from an account that the goal names, which
+///   includes the account of each payment that it names.
+///
+/// The amounts are those of [`moves`], from these payments only, and the
+/// amount that each refund needs on top of the balance of its account.
+fn reduced_moves(
+    state: &Ledger,
+    start: &Ledger,
+    focus: &Focus,
+    amounts: &BTreeSet<u64>,
+) -> Vec<Command> {
+    let payments: Vec<&String> = state
+        .payments
+        .keys()
+        .filter(|id| focus.payments.contains(*id) || !start.payments.contains_key(*id))
+        .collect();
+    let mut amounts = amounts.clone();
+    for id in &payments {
+        let p = &state.payments[*id];
+        match p.status {
+            Status::Authorized => {
+                amounts.insert(p.authorized);
+            }
+            Status::Captured | Status::PartiallyRefunded => {
+                amounts.insert(p.refundable());
+                let balance = state.accounts.get(&p.account).copied().unwrap_or(0);
+                if p.refundable() > balance {
+                    amounts.insert(p.refundable() - balance);
+                }
+            }
+            Status::Voided | Status::Refunded => {}
+        }
+    }
+    let mut moves = Vec::new();
+    for payment in payments {
+        moves.push(Command::Void {
+            payment: payment.clone(),
+        });
+        for &amount in &amounts {
+            moves.push(Command::Capture {
+                payment: payment.clone(),
+                amount,
+            });
+            moves.push(Command::Refund {
+                payment: payment.clone(),
+                amount,
+            });
+        }
+    }
+    for (account, amount) in &focus.new_payments {
+        moves.push(Command::Authorize {
+            account: account.clone(),
+            amount: *amount,
+        });
+    }
+    for from in state.accounts.keys() {
+        for to in state.accounts.keys() {
+            if !focus.accounts.contains(from) && !focus.accounts.contains(to) {
+                continue;
+            }
+            for &amount in &amounts {
+                moves.push(Command::Transfer {
+                    from: from.clone(),
+                    to: to.clone(),
+                    amount,
+                });
+            }
+        }
+    }
+    moves.retain(|command| state.permits(command).is_ok());
+    moves
+}
+
 /// The shortest sequence of money commands from `start` to `goal`, with at
 /// most `max_len` commands, by breadth-first search. The sequence does not
 /// include `DONE`. `None` if no sequence of that length gets to the goal.
 ///
-/// The search tries only the amounts of [`moves`], so it ends. Of two
-/// sequences with the same length, it gives the first in the order of
-/// [`moves`].
+/// The search tries only the commands of [`reduced_moves`]. The full
+/// search ([`shortest_full`]) does not end in useful time on a ledger with 5
+/// accounts and 20 payments at a length of 3. A sequence with other
+/// commands can be shorter, so the length is an upper bound in general.
+/// The tests compare the two searches up to a length of 3. Of two
+/// sequences with the same length, the search gives the first in the order
+/// of the moves.
 pub fn shortest(start: &Ledger, goal: &Goal, max_len: usize) -> Option<Vec<Command>> {
+    let amounts = goal.amounts(start);
+    let focus = goal.focus(start);
+    search(start, goal, max_len, |state| {
+        reduced_moves(state, start, &focus, &amounts)
+    })
+}
+
+/// [`shortest`] with all the commands of [`moves`]. The length is exact for
+/// the amounts of [`moves`], but the search is slow on a large ledger.
+pub fn shortest_full(start: &Ledger, goal: &Goal, max_len: usize) -> Option<Vec<Command>> {
+    let amounts = goal.amounts(start);
+    search(start, goal, max_len, |state| moves(state, &amounts))
+}
+
+fn search(
+    start: &Ledger,
+    goal: &Goal,
+    max_len: usize,
+    moves: impl Fn(&Ledger) -> Vec<Command>,
+) -> Option<Vec<Command>> {
     if goal.is_met(start, start) {
         return Some(Vec::new());
     }
-    let amounts = goal.amounts(start);
     // Each node: the state, the node before it, the command, the length.
     let mut nodes: Vec<(Ledger, usize, Command, usize)> = Vec::new();
     let mut seen = HashSet::from([start.clone()]);
@@ -399,7 +543,7 @@ pub fn shortest(start: &Ledger, goal: &Goal, max_len: usize) -> Option<Vec<Comma
         }
         let mut found = None;
         let mut next = Vec::new();
-        for command in moves(state, &amounts) {
+        for command in moves(state) {
             let mut after = state.clone();
             after
                 .execute(&command)
@@ -772,6 +916,8 @@ mod tests {
         let start = ledger();
         let found = shortest(&start, goal, 4).expect("a sequence");
         assert_eq!(found.len(), len, "{goal:?}: {found:?}");
+        let full = shortest_full(&start, goal, 4).expect("a sequence");
+        assert_eq!(full.len(), len, "the full search: {goal:?}: {full:?}");
         let mut state = start.clone();
         for command in &found {
             assert_eq!(state.execute(command), Ok(Step::Continue));
@@ -858,5 +1004,11 @@ mod tests {
             shortest(&start, &goal(vec![status("p_1", Status::Refunded)]), 1),
             None
         );
+        for search in [shortest, shortest_full] {
+            assert_eq!(
+                search(&start, &goal(vec![status("p_3", Status::Captured)]), 2),
+                None
+            );
+        }
     }
 }

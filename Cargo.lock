@@ -876,6 +876,11 @@ dependencies = [
 name = "fornace-constrain"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
+ "clap",
+ "fornace-engine",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
