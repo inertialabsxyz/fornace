@@ -873,6 +873,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fornace-constrain"
+version = "0.0.1"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "fornace-engine"
 version = "0.0.1"
 dependencies = [
