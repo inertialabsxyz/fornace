@@ -31,6 +31,8 @@ axum = "0.8.9"
 tokio-stream = "0.1.19"
 futures-util = "0.3.34"
 ureq = "3.5.2"
+# The grammar engine of the constrained sampling mask (fornace-constrain).
+llguidance = { version = "1.9.1", default-features = false, features = ["lark"] }
 
 # Candle 0.11.0 with five changes (fork branch fornace/qmatmul-tile):
 # - The Metal buffer pool does not reuse a buffer larger than 2 × the rounded

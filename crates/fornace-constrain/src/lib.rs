@@ -5,6 +5,7 @@
 
 pub mod bench;
 pub mod chat;
+pub mod grammar;
 pub mod ledger;
 pub mod range;
 pub mod rng;

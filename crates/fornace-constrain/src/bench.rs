@@ -21,6 +21,9 @@ pub const MAX_COMMAND_TOKENS: usize = 128;
 pub enum Config {
     /// No constraint: the rules are in the prompt only.
     A,
+    /// The grammar of the 7 commands ([`crate::grammar::GRAMMAR_B`]), with
+    /// no knowledge of the state.
+    B,
 }
 
 /// The system message: the commands and the guards.
@@ -155,6 +158,10 @@ pub struct Generation {
     pub generated_tokens: usize,
     pub prefill_ms: f64,
     pub decode_ms: f64,
+    /// The mean mask time for each token. `None` with no mask.
+    pub mask_ms_per_token: Option<f64>,
+    /// The grammar compile time. `None` with no grammar.
+    pub compile_ms: Option<f64>,
 }
 
 /// The model of the outer loop.
@@ -270,8 +277,8 @@ pub fn run_task(
             generated_tokens: result.generated_tokens,
             prefill_ms: result.prefill_ms,
             decode_ms: result.decode_ms,
-            mask_ms_per_token: None,
-            compile_ms: None,
+            mask_ms_per_token: result.mask_ms_per_token,
+            compile_ms: result.compile_ms,
         });
         let text = result.text.trim().to_string();
         let (command, answer) = match parse_command(&text) {
@@ -507,6 +514,8 @@ mod tests {
                 prompt_tokens: 0,
                 prefill_ms: 0.0,
                 decode_ms: 0.0,
+                mask_ms_per_token: None,
+                compile_ms: None,
             })
         }
     }
