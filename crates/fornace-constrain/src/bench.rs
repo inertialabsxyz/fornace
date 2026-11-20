@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::fault::{self, Fault};
 use crate::ledger::{Command, Ledger, Step};
 use crate::rng::Rng;
 use crate::tasks::{Action, Class, Task};
@@ -24,6 +25,9 @@ pub enum Config {
     /// The grammar of the 7 commands ([`crate::grammar::GRAMMAR_B`]), with
     /// no knowledge of the state.
     B,
+    /// The grammar for each state ([`crate::compile`]), compiled again
+    /// before each command.
+    C,
 }
 
 /// The system message: the commands and the guards.
@@ -71,6 +75,10 @@ pub struct Output {
     pub command: Option<Command>,
     pub answer: Answer,
     pub tokens: usize,
+    /// The fault of a generation that the fault test selects. Not in the
+    /// file of a run with no fault test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<Fault>,
 }
 
 /// The class of the first command of a trap task, as in the outcome table
@@ -166,8 +174,16 @@ pub struct Generation {
 
 /// The model of the outer loop.
 pub trait Model {
-    /// One command for `prompt`, sampled with `seed`.
-    fn command(&mut self, prompt: &str, seed: u64) -> anyhow::Result<Generation>;
+    /// One command for `prompt`, sampled with `seed`. `state` is the state
+    /// before the command, for a grammar of the state. The model calls
+    /// `watch` with the text so far after each token.
+    fn command(
+        &mut self,
+        prompt: &str,
+        seed: u64,
+        state: &Ledger,
+        watch: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<Generation>;
 }
 
 /// The user message for the next command: the request, the full state,
@@ -250,13 +266,15 @@ pub fn sampler_seed(seed: u64, task: usize, generation: usize) -> u64 {
 }
 
 /// Runs one task with one seed. The result has the outcome and a timing
-/// for each generation.
+/// for each generation. With `faults`, the fault test ([`crate::fault`])
+/// changes the state in the selected generations.
 pub fn run_task(
     model: &mut dyn Model,
     model_name: &str,
     config: Config,
     task: &Task,
     seed: u64,
+    faults: bool,
 ) -> anyhow::Result<(Outcome, Vec<Timing>)> {
     let request = task
         .request
@@ -268,7 +286,29 @@ pub fn run_task(
     let mut ended_by = "limit";
     for generation in 0..MAX_GENERATIONS {
         let prompt = crate::chat::chat_prompt(SYSTEM, &user_message(request, &state, &outputs));
-        let result = model.command(&prompt, sampler_seed(seed, task.id, generation))?;
+        let generation_seed = sampler_seed(seed, task.id, generation);
+        let selected = faults && fault::selected(generation_seed);
+        let mut tokens_so_far = 0;
+        let mut written: Option<(usize, String, String)> = None;
+        let mut watch = |text: &str| {
+            tokens_so_far += 1;
+            if selected
+                && written.is_none()
+                && let Some((name, id)) = fault::written_id(text)
+            {
+                written = Some((tokens_so_far, name.to_string(), id.to_string()));
+            }
+        };
+        let result = model.command(&prompt, generation_seed, &state, &mut watch)?;
+        // The state changes after the ID field and before the check. The
+        // grammar of this generation is from the old state.
+        let mut fault = selected.then(|| Fault {
+            token: written.as_ref().map(|w| w.0),
+            change: written
+                .as_ref()
+                .and_then(|(_, name, id)| fault::apply(&mut state, name, id)),
+            stopped: false,
+        });
         timings.push(Timing {
             task: task.id,
             seed,
@@ -297,11 +337,15 @@ pub fn run_task(
             (Some(Command::AskOperator { .. }), _) => Some("ask_operator"),
             _ => None,
         };
+        if let Some(fault) = fault.as_mut() {
+            fault.stopped = matches!(answer, Answer::Refused(_));
+        }
         outputs.push(Output {
             text,
             command,
             answer,
             tokens: result.generated_tokens,
+            fault,
         });
         if let Some(end) = end {
             ended_by = end;
@@ -502,12 +546,21 @@ mod tests {
     struct Script(Vec<&'static str>);
 
     impl Model for Script {
-        fn command(&mut self, _prompt: &str, _seed: u64) -> anyhow::Result<Generation> {
+        fn command(
+            &mut self,
+            _prompt: &str,
+            _seed: u64,
+            _state: &Ledger,
+            watch: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<Generation> {
             let text = if self.0.is_empty() {
                 "nothing".to_string()
             } else {
                 self.0.remove(0).to_string()
             };
+            for end in 1..=text.len() {
+                watch(&text[..end]);
+            }
             Ok(Generation {
                 generated_tokens: text.len(),
                 text,
@@ -527,7 +580,7 @@ mod tests {
     }
 
     fn run(task: &Task, script: Vec<&'static str>) -> Outcome {
-        run_task(&mut Script(script), "script", Config::A, task, 1)
+        run_task(&mut Script(script), "script", Config::A, task, 1, false)
             .expect("run")
             .0
     }
@@ -578,12 +631,14 @@ mod tests {
                 }),
                 answer: Answer::Refused("payment p_99 does not exist".to_string()),
                 tokens: 9,
+                fault: None,
             },
             Output {
                 text: "I will refund".to_string(),
                 command: None,
                 answer: Answer::ParseFailure("expected value".to_string()),
                 tokens: 3,
+                fault: None,
             },
         ];
         let text = user_message("a request", &task.start, &outputs);
@@ -723,8 +778,60 @@ mod tests {
             }),
             answer: Answer::Ok,
             tokens: 1,
+            fault: None,
         };
         assert_eq!(unit_errors(&task, &[output(40), output(400_000)]), 2);
         assert_eq!(unit_errors(&task, &[output(4_000), output(400)]), 0);
+    }
+
+    /// A selected generation changes the state after the ID field, and the
+    /// check before execution stops the command.
+    #[test]
+    fn the_fault_test_stops_a_changed_command() {
+        let task = task_with_request(0);
+        let (from, _) = task
+            .start
+            .accounts
+            .iter()
+            .find(|(_, b)| **b > 0)
+            .expect("an account with a balance");
+        let to = task
+            .start
+            .accounts
+            .keys()
+            .find(|a| *a != from)
+            .expect("two accounts");
+        let transfer = format!(r#"{{"cmd":"TRANSFER","from":"{from}","to":"{to}","amount":1}}"#);
+        let seed = (1..)
+            .find(|&s| fault::selected(sampler_seed(s, task.id, 0)))
+            .expect("a selected seed");
+        let script = vec![
+            Box::leak(transfer.into_boxed_str()) as &str,
+            "{\"cmd\":\"DONE\"}",
+        ];
+        let (outcome, _) = run_task(
+            &mut Script(script.clone()),
+            "script",
+            Config::C,
+            &task,
+            seed,
+            true,
+        )
+        .unwrap();
+        let fault = outcome.outputs[0]
+            .fault
+            .as_ref()
+            .expect("the first generation is selected");
+        assert_eq!(fault.change, Some(format!("balance of {from} set to 0")));
+        assert!(fault.stopped);
+        assert!(
+            fault
+                .token
+                .is_some_and(|t| t < outcome.outputs[0].text.len())
+        );
+        let (clean, _) =
+            run_task(&mut Script(script), "script", Config::C, &task, seed, false).unwrap();
+        assert_eq!(clean.outputs[0].answer, Answer::Ok);
+        assert!(clean.outputs.iter().all(|o| o.fault.is_none()));
     }
 }

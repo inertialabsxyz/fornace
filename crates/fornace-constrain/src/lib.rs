@@ -5,6 +5,8 @@
 
 pub mod bench;
 pub mod chat;
+pub mod compile;
+pub mod fault;
 pub mod grammar;
 pub mod ledger;
 pub mod range;

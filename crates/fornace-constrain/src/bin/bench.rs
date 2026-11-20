@@ -10,8 +10,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use fornace_constrain::bench::{Config, Generation, MAX_COMMAND_TOKENS, Model, json_end, run_task};
+use fornace_constrain::bench::{
+    Answer, Config, Generation, MAX_COMMAND_TOKENS, Model, json_end, run_task,
+};
+use fornace_constrain::compile::{LedgerRules, Rules, lark};
 use fornace_constrain::grammar::{GRAMMAR_B, Grammars};
+use fornace_constrain::ledger::Ledger;
 use fornace_constrain::runs::{commit, parse_ids, today, writer};
 use fornace_constrain::tasks::Task;
 use fornace_engine::{DeviceKind, Dtype, Engine, GenerateOptions, LoadConfig};
@@ -45,16 +49,27 @@ struct Args {
     /// over the first.
     #[arg(long)]
     tag: Option<String>,
+    /// The fault test: change the state in 1 of 20 generations, after the
+    /// ID field (brief, step 3). Give a `--tag` also.
+    #[arg(long)]
+    fault: bool,
 }
 
 struct EngineModel {
     engine: Engine,
-    /// The grammar of the configuration. `None` for A.
-    grammar: Option<(Grammars, &'static str)>,
+    config: Config,
+    /// The parser factory. `None` for A.
+    grammars: Option<Grammars>,
 }
 
 impl Model for EngineModel {
-    fn command(&mut self, prompt: &str, seed: u64) -> Result<Generation> {
+    fn command(
+        &mut self,
+        prompt: &str,
+        seed: u64,
+        state: &Ledger,
+        watch: &mut dyn FnMut(&str),
+    ) -> Result<Generation> {
         let options = GenerateOptions {
             max_new_tokens: MAX_COMMAND_TOKENS,
             ignore_eos: false,
@@ -65,21 +80,29 @@ impl Model for EngineModel {
         let mut text = String::new();
         let mut on_token = |event: fornace_engine::TokenEvent| {
             text.push_str(&event.text);
+            watch(&text);
             if json_end(&text).is_some() {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
             }
         };
-        let (report, mask_ms_per_token, compile_ms) = match &self.grammar {
-            None => (
+        let grammar = match self.config {
+            Config::A => None,
+            Config::B => Some(GRAMMAR_B.to_string()),
+            // The grammar of the state now, built and compiled again for
+            // each command. The compile time includes both.
+            Config::C => Some(lark(&LedgerRules.params(state))),
+        };
+        let (report, mask_ms_per_token, compile_ms) = match (&self.grammars, grammar) {
+            (None, _) | (_, None) => (
                 self.engine
                     .generate_stream(prompt, &options, &mut on_token)?,
                 None,
                 None,
             ),
-            Some((grammars, lark)) => {
-                let mut mask = grammars.mask(lark)?;
+            (Some(grammars), Some(grammar)) => {
+                let mut mask = grammars.mask(&grammar)?;
                 let report = self.engine.generate_stream_with_hook(
                     prompt,
                     &options,
@@ -153,23 +176,37 @@ fn main() -> Result<()> {
         draft: None,
     };
     let engine = Engine::load(&config).context("load the model")?;
-    let grammar = match args.config {
+    let grammars = match args.config {
         Config::A => None,
-        Config::B => Some((grammars(&args.model)?, GRAMMAR_B)),
+        Config::B | Config::C => Some(grammars(&args.model)?),
     };
-    let mut model = EngineModel { engine, grammar };
+    let mut model = EngineModel {
+        engine,
+        config: args.config,
+        grammars,
+    };
     let (mut runs, mut successes) = (0, 0);
+    // The refused commands, and the fault test: selected, changed, stopped.
+    let (mut refused, mut selected, mut changed, mut stopped) = (0, 0, 0, 0);
     for &id in &ids {
         let task = all.get(id).with_context(|| format!("no task {id}"))?;
         for &seed in &args.seeds {
             let (outcome, task_timings) =
-                run_task(&mut model, &model_name, args.config, task, seed)?;
+                run_task(&mut model, &model_name, args.config, task, seed, args.fault)?;
             writeln!(outcomes, "{}", serde_json::to_string(&outcome)?)?;
             for timing in &task_timings {
                 writeln!(timings, "{}", serde_json::to_string(timing)?)?;
             }
             runs += 1;
             successes += usize::from(outcome.score.success);
+            for output in &outcome.outputs {
+                refused += usize::from(matches!(output.answer, Answer::Refused(_)));
+                if let Some(fault) = &output.fault {
+                    selected += 1;
+                    changed += usize::from(fault.change.is_some());
+                    stopped += usize::from(fault.change.is_some() && fault.stopped);
+                }
+            }
             eprintln!(
                 "task {id:3} seed {seed}: {} in {} outputs, success {} ({successes}/{runs})",
                 outcome.ended_by,
@@ -180,7 +217,13 @@ fn main() -> Result<()> {
     }
     outcomes.flush()?;
     timings.flush()?;
-    println!("{stem}: task success {successes} of {runs}");
+    println!("{stem}: task success {successes} of {runs}, refused commands {refused}");
+    if args.fault {
+        println!(
+            "fault test: {selected} generations selected, {changed} changed, \
+             {stopped} of {changed} stopped by the check"
+        );
+    }
     Ok(())
 }
 
