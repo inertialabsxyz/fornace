@@ -3,5 +3,8 @@
 //!
 //! The test case is a simulated payments ledger ([`ledger`]).
 
+pub mod chat;
 pub mod ledger;
 pub mod range;
+pub mod rng;
+pub mod tasks;
