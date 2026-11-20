@@ -4,3 +4,4 @@
 //! The test case is a simulated payments ledger ([`ledger`]).
 
 pub mod ledger;
+pub mod range;
