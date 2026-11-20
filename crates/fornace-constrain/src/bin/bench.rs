@@ -3,16 +3,15 @@
 //! `<date>-<commit>-<config>-<model>[-<tag>]-outcomes.jsonl` and
 //! `...-timings.jsonl`.
 
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::fs;
+use std::io::Write;
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
-use std::process::Command as Process;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use fornace_constrain::bench::{Config, Generation, MAX_COMMAND_TOKENS, Model, json_end, run_task};
+use fornace_constrain::runs::{commit, parse_ids, today, writer};
 use fornace_constrain::tasks::Task;
 use fornace_engine::{DeviceKind, Dtype, Engine, GenerateOptions, LoadConfig};
 
@@ -146,60 +145,4 @@ fn main() -> Result<()> {
     timings.flush()?;
     println!("{stem}: task success {successes} of {runs}");
     Ok(())
-}
-
-fn writer(dir: &Path, name: &str) -> Result<BufWriter<File>> {
-    let path = dir.join(name);
-    if path.exists() {
-        bail!("{path:?} exists. Give another --tag");
-    }
-    eprintln!("writing {path:?}");
-    Ok(BufWriter::new(File::create(&path)?))
-}
-
-/// `0-29,180,185-189` as a list of IDs.
-fn parse_ids(text: &str) -> Result<Vec<usize>> {
-    let mut ids = Vec::new();
-    for part in text.split(',') {
-        match part.split_once('-') {
-            Some((a, b)) => ids.extend(a.trim().parse::<usize>()?..=b.trim().parse::<usize>()?),
-            None => ids.push(part.trim().parse()?),
-        }
-    }
-    Ok(ids)
-}
-
-/// The short commit hash, with `-dirty` if the tree has changes.
-fn commit() -> String {
-    let run = |args: &[&str]| {
-        Process::new("git")
-            .args(args)
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    };
-    let hash = run(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "nogit".to_string());
-    let dirty =
-        run(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
-    if dirty { format!("{hash}-dirty") } else { hash }
-}
-
-/// The UTC date as `YYYY-MM-DD`.
-fn today() -> String {
-    let days = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() / 86_400)
-        .unwrap_or(0) as i64;
-    // The civil date from the day count (H. Hinnant, "chrono-compatible
-    // low-level date algorithms").
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
 }
