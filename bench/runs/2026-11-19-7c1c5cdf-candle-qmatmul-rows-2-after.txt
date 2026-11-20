@@ -1,0 +1,449 @@
+    Finished `bench` profile [optimized] target(s) in 0.19s
+     Running benches/bench_main.rs (target/release/deps/bench_main-335e61a26748ea47)
+Benchmarking metal_qmatmul_rows_Q4_0/q_m1
+Benchmarking metal_qmatmul_rows_Q4_0/q_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/q_m1: Collecting 50 samples in estimated 5.0020 s (868k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/q_m1: Analyzing
+metal_qmatmul_rows_Q4_0/q_m1
+                        time:   [5.7302 µs 5.7319 µs 5.7339 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  1 (2.00%) low mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/q_m2
+Benchmarking metal_qmatmul_rows_Q4_0/q_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/q_m2: Collecting 50 samples in estimated 5.0030 s (778k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/q_m2: Analyzing
+metal_qmatmul_rows_Q4_0/q_m2
+                        time:   [6.4223 µs 6.4246 µs 6.4276 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  2 (4.00%) high mild
+  4 (8.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/q_m4
+Benchmarking metal_qmatmul_rows_Q4_0/q_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/q_m4: Collecting 50 samples in estimated 5.0016 s (555k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/q_m4: Analyzing
+metal_qmatmul_rows_Q4_0/q_m4
+                        time:   [9.0257 µs 9.0309 µs 9.0372 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  1 (2.00%) high mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/q_m8
+Benchmarking metal_qmatmul_rows_Q4_0/q_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/q_m8: Collecting 50 samples in estimated 5.0090 s (550k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/q_m8: Analyzing
+metal_qmatmul_rows_Q4_0/q_m8
+                        time:   [9.1220 µs 9.1257 µs 9.1301 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  1 (2.00%) high mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/q_m16
+Benchmarking metal_qmatmul_rows_Q4_0/q_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/q_m16: Collecting 50 samples in estimated 5.0055 s (421k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/q_m16: Analyzing
+metal_qmatmul_rows_Q4_0/q_m16
+                        time:   [12.015 µs 12.022 µs 12.029 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  2 (4.00%) high mild
+  4 (8.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m1
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m1: Collecting 50 samples in estimated 5.0039 s (1.2M iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m1: Analyzing
+metal_qmatmul_rows_Q4_0/k_v_m1
+                        time:   [4.3016 µs 4.3029 µs 4.3045 µs]
+Found 7 outliers among 50 measurements (14.00%)
+  2 (4.00%) high mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m2
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m2: Collecting 50 samples in estimated 5.0010 s (1.2M iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m2: Analyzing
+metal_qmatmul_rows_Q4_0/k_v_m2
+                        time:   [4.3175 µs 4.3190 µs 4.3208 µs]
+Found 8 outliers among 50 measurements (16.00%)
+  2 (4.00%) high mild
+  6 (12.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m4
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m4: Collecting 50 samples in estimated 5.0020 s (963k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m4: Analyzing
+metal_qmatmul_rows_Q4_0/k_v_m4
+                        time:   [5.1941 µs 5.1960 µs 5.1983 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  1 (2.00%) high mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m8
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m8: Collecting 50 samples in estimated 5.0041 s (958k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m8: Analyzing
+metal_qmatmul_rows_Q4_0/k_v_m8
+                        time:   [5.2257 µs 5.2276 µs 5.2300 µs]
+Found 7 outliers among 50 measurements (14.00%)
+  1 (2.00%) high mild
+  6 (12.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m16
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m16: Collecting 50 samples in estimated 5.0055 s (844k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/k_v_m16: Analyzing
+metal_qmatmul_rows_Q4_0/k_v_m16
+                        time:   [5.9405 µs 5.9428 µs 5.9455 µs]
+Found 7 outliers among 50 measurements (14.00%)
+  2 (4.00%) high mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m1
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m1: Collecting 50 samples in estimated 5.0066 s (353k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m1: Analyzing
+metal_qmatmul_rows_Q4_0/gate_up_m1
+                        time:   [14.300 µs 14.324 µs 14.355 µs]
+Found 3 outliers among 50 measurements (6.00%)
+  1 (2.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m2
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m2: Collecting 50 samples in estimated 5.0086 s (246k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m2: Analyzing
+metal_qmatmul_rows_Q4_0/gate_up_m2
+                        time:   [20.161 µs 20.184 µs 20.215 µs]
+Found 3 outliers among 50 measurements (6.00%)
+  1 (2.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m4
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m4: Collecting 50 samples in estimated 5.0289 s (181k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m4: Analyzing
+metal_qmatmul_rows_Q4_0/gate_up_m4
+                        time:   [27.226 µs 27.262 µs 27.310 µs]
+Found 4 outliers among 50 measurements (8.00%)
+  2 (4.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m8
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m8: Collecting 50 samples in estimated 5.0151 s (182k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m8: Analyzing
+metal_qmatmul_rows_Q4_0/gate_up_m8
+                        time:   [27.741 µs 27.787 µs 27.848 µs]
+Found 4 outliers among 50 measurements (8.00%)
+  1 (2.00%) high mild
+  3 (6.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m16
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m16: Collecting 50 samples in estimated 5.0115 s (101k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/gate_up_m16: Analyzing
+metal_qmatmul_rows_Q4_0/gate_up_m16
+                        time:   [49.242 µs 49.280 µs 49.322 µs]
+Found 9 outliers among 50 measurements (18.00%)
+  5 (10.00%) high mild
+  4 (8.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/down_m1
+Benchmarking metal_qmatmul_rows_Q4_0/down_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/down_m1: Collecting 50 samples in estimated 5.0165 s (351k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/down_m1: Analyzing
+metal_qmatmul_rows_Q4_0/down_m1
+                        time:   [14.277 µs 14.283 µs 14.291 µs]
+                        change: [−3.7960% −1.8560% +0.0921%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+Found 9 outliers among 50 measurements (18.00%)
+  4 (8.00%) high mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/down_m2
+Benchmarking metal_qmatmul_rows_Q4_0/down_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/down_m2: Collecting 50 samples in estimated 5.0147 s (302k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/down_m2: Analyzing
+metal_qmatmul_rows_Q4_0/down_m2
+                        time:   [16.625 µs 16.677 µs 16.728 µs]
+Found 5 outliers among 50 measurements (10.00%)
+  2 (4.00%) high mild
+  3 (6.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/down_m4
+Benchmarking metal_qmatmul_rows_Q4_0/down_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/down_m4: Collecting 50 samples in estimated 5.0027 s (159k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/down_m4: Analyzing
+metal_qmatmul_rows_Q4_0/down_m4
+                        time:   [31.162 µs 31.195 µs 31.230 µs]
+Found 5 outliers among 50 measurements (10.00%)
+  3 (6.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/down_m8
+Benchmarking metal_qmatmul_rows_Q4_0/down_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/down_m8: Collecting 50 samples in estimated 5.0396 s (158k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/down_m8: Analyzing
+metal_qmatmul_rows_Q4_0/down_m8
+                        time:   [32.037 µs 32.072 µs 32.117 µs]
+                        change: [−1.3771% +0.6774% +2.2144%] (p = 0.52 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 50 measurements (10.00%)
+  2 (4.00%) high mild
+  3 (6.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/down_m16
+Benchmarking metal_qmatmul_rows_Q4_0/down_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/down_m16: Collecting 50 samples in estimated 5.0046 s (105k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/down_m16: Analyzing
+metal_qmatmul_rows_Q4_0/down_m16
+                        time:   [48.684 µs 48.776 µs 48.864 µs]
+Found 2 outliers among 50 measurements (4.00%)
+  1 (2.00%) high mild
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m1
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m1: Collecting 50 samples in estimated 5.3029 s (17k iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m1: Analyzing
+metal_qmatmul_rows_Q4_0/lm_head_m1
+                        time:   [339.91 µs 341.07 µs 342.20 µs]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m2
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m2: Collecting 50 samples in estimated 5.2509 s (8925 iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m2: Analyzing
+metal_qmatmul_rows_Q4_0/lm_head_m2
+                        time:   [580.49 µs 582.54 µs 584.30 µs]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m4
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m4: Collecting 50 samples in estimated 5.9265 s (7650 iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m4: Analyzing
+metal_qmatmul_rows_Q4_0/lm_head_m4
+                        time:   [790.36 µs 794.87 µs 798.49 µs]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m8
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m8: Collecting 50 samples in estimated 5.1347 s (6375 iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m8: Analyzing
+metal_qmatmul_rows_Q4_0/lm_head_m8
+                        time:   [819.61 µs 820.99 µs 822.16 µs]
+Found 5 outliers among 50 measurements (10.00%)
+  1 (2.00%) low mild
+  2 (4.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m16
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m16: Collecting 50 samples in estimated 5.9304 s (3825 iterations)
+Benchmarking metal_qmatmul_rows_Q4_0/lm_head_m16: Analyzing
+metal_qmatmul_rows_Q4_0/lm_head_m16
+                        time:   [1.5697 ms 1.5757 ms 1.5815 ms]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+
+Benchmarking metal_qmatmul_rows_Q8_0/q_m1
+Benchmarking metal_qmatmul_rows_Q8_0/q_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/q_m1: Collecting 50 samples in estimated 5.0064 s (695k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/q_m1: Analyzing
+metal_qmatmul_rows_Q8_0/q_m1
+                        time:   [7.1904 µs 7.1939 µs 7.1983 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  2 (4.00%) high mild
+  4 (8.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/q_m2
+Benchmarking metal_qmatmul_rows_Q8_0/q_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/q_m2: Collecting 50 samples in estimated 5.0052 s (650k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/q_m2: Analyzing
+metal_qmatmul_rows_Q8_0/q_m2
+                        time:   [7.6808 µs 7.6852 µs 7.6906 µs]
+Found 7 outliers among 50 measurements (14.00%)
+  3 (6.00%) high mild
+  4 (8.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/q_m4
+Benchmarking metal_qmatmul_rows_Q8_0/q_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/q_m4: Collecting 50 samples in estimated 5.0111 s (464k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/q_m4: Analyzing
+metal_qmatmul_rows_Q8_0/q_m4
+                        time:   [10.803 µs 10.808 µs 10.813 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  6 (12.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/q_m8
+Benchmarking metal_qmatmul_rows_Q8_0/q_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/q_m8: Collecting 50 samples in estimated 5.0096 s (458k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/q_m8: Analyzing
+metal_qmatmul_rows_Q8_0/q_m8
+                        time:   [10.959 µs 10.967 µs 10.976 µs]
+Found 4 outliers among 50 measurements (8.00%)
+  1 (2.00%) high mild
+  3 (6.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/q_m16
+Benchmarking metal_qmatmul_rows_Q8_0/q_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/q_m16: Collecting 50 samples in estimated 5.0117 s (374k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/q_m16: Analyzing
+metal_qmatmul_rows_Q8_0/q_m16
+                        time:   [13.588 µs 13.708 µs 13.816 µs]
+Found 2 outliers among 50 measurements (4.00%)
+  1 (2.00%) high mild
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m1
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m1: Collecting 50 samples in estimated 5.0029 s (986k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m1: Analyzing
+metal_qmatmul_rows_Q8_0/k_v_m1
+                        time:   [5.0751 µs 5.0775 µs 5.0804 µs]
+Found 7 outliers among 50 measurements (14.00%)
+  7 (14.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m2
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m2: Collecting 50 samples in estimated 5.0042 s (986k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m2: Analyzing
+metal_qmatmul_rows_Q8_0/k_v_m2
+                        time:   [5.0844 µs 5.0898 µs 5.0969 µs]
+Found 5 outliers among 50 measurements (10.00%)
+  3 (6.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m4
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m4: Collecting 50 samples in estimated 5.0030 s (909k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m4: Analyzing
+metal_qmatmul_rows_Q8_0/k_v_m4
+                        time:   [5.5009 µs 5.5031 µs 5.5056 µs]
+Found 8 outliers among 50 measurements (16.00%)
+  3 (6.00%) high mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m8
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m8: Collecting 50 samples in estimated 5.0013 s (904k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m8: Analyzing
+metal_qmatmul_rows_Q8_0/k_v_m8
+                        time:   [5.5380 µs 5.5400 µs 5.5425 µs]
+Found 4 outliers among 50 measurements (8.00%)
+  4 (8.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m16
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m16: Collecting 50 samples in estimated 5.0062 s (807k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/k_v_m16: Analyzing
+metal_qmatmul_rows_Q8_0/k_v_m16
+                        time:   [6.2034 µs 6.2059 µs 6.2088 µs]
+Found 6 outliers among 50 measurements (12.00%)
+  1 (2.00%) high mild
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m1
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m1: Collecting 50 samples in estimated 5.0036 s (218k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m1: Analyzing
+metal_qmatmul_rows_Q8_0/gate_up_m1
+                        time:   [22.977 µs 22.993 µs 23.014 µs]
+Found 4 outliers among 50 measurements (8.00%)
+  2 (4.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m2
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m2: Collecting 50 samples in estimated 5.0022 s (180k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m2: Analyzing
+metal_qmatmul_rows_Q8_0/gate_up_m2
+                        time:   [27.109 µs 27.149 µs 27.205 µs]
+Found 3 outliers among 50 measurements (6.00%)
+  3 (6.00%) high mild
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m4
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m4: Collecting 50 samples in estimated 5.0023 s (136k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m4: Analyzing
+metal_qmatmul_rows_Q8_0/gate_up_m4
+                        time:   [35.686 µs 35.709 µs 35.734 µs]
+Found 5 outliers among 50 measurements (10.00%)
+  2 (4.00%) high mild
+  3 (6.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m8
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m8: Collecting 50 samples in estimated 5.0376 s (139k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m8: Analyzing
+metal_qmatmul_rows_Q8_0/gate_up_m8
+                        time:   [36.776 µs 36.885 µs 36.995 µs]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m16
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m16: Collecting 50 samples in estimated 5.0551 s (84k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/gate_up_m16: Analyzing
+metal_qmatmul_rows_Q8_0/gate_up_m16
+                        time:   [59.499 µs 59.637 µs 59.775 µs]
+Found 3 outliers among 50 measurements (6.00%)
+  3 (6.00%) high mild
+Benchmarking metal_qmatmul_rows_Q8_0/down_m1
+Benchmarking metal_qmatmul_rows_Q8_0/down_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/down_m1: Collecting 50 samples in estimated 5.0220 s (217k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/down_m1: Analyzing
+metal_qmatmul_rows_Q8_0/down_m1
+                        time:   [23.159 µs 23.212 µs 23.283 µs]
+Found 5 outliers among 50 measurements (10.00%)
+  3 (6.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/down_m2
+Benchmarking metal_qmatmul_rows_Q8_0/down_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/down_m2: Collecting 50 samples in estimated 5.0098 s (194k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/down_m2: Analyzing
+metal_qmatmul_rows_Q8_0/down_m2
+                        time:   [25.935 µs 26.017 µs 26.098 µs]
+Found 3 outliers among 50 measurements (6.00%)
+  1 (2.00%) high mild
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/down_m4
+Benchmarking metal_qmatmul_rows_Q8_0/down_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/down_m4: Collecting 50 samples in estimated 5.0383 s (115k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/down_m4: Analyzing
+metal_qmatmul_rows_Q8_0/down_m4
+                        time:   [43.471 µs 43.531 µs 43.595 µs]
+Found 5 outliers among 50 measurements (10.00%)
+  2 (4.00%) high mild
+  3 (6.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/down_m8
+Benchmarking metal_qmatmul_rows_Q8_0/down_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/down_m8: Collecting 50 samples in estimated 5.0233 s (112k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/down_m8: Analyzing
+metal_qmatmul_rows_Q8_0/down_m8
+                        time:   [44.722 µs 44.775 µs 44.823 µs]
+Found 4 outliers among 50 measurements (8.00%)
+  1 (2.00%) high mild
+  3 (6.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/down_m16
+Benchmarking metal_qmatmul_rows_Q8_0/down_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/down_m16: Collecting 50 samples in estimated 5.0183 s (82k iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/down_m16: Analyzing
+metal_qmatmul_rows_Q8_0/down_m16
+                        time:   [61.680 µs 61.850 µs 61.986 µs]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m1
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m1: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m1: Collecting 50 samples in estimated 5.1915 s (8925 iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m1: Analyzing
+metal_qmatmul_rows_Q8_0/lm_head_m1
+                        time:   [585.45 µs 586.21 µs 587.14 µs]
+Found 5 outliers among 50 measurements (10.00%)
+  5 (10.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m2
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m2: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m2: Collecting 50 samples in estimated 5.7506 s (7650 iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m2: Analyzing
+metal_qmatmul_rows_Q8_0/lm_head_m2
+                        time:   [749.06 µs 753.55 µs 757.24 µs]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m4
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m4: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m4: Collecting 50 samples in estimated 6.1997 s (6375 iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m4: Analyzing
+metal_qmatmul_rows_Q8_0/lm_head_m4
+                        time:   [974.98 µs 977.99 µs 980.92 µs]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m8
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m8: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m8: Collecting 50 samples in estimated 5.0388 s (5100 iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m8: Analyzing
+metal_qmatmul_rows_Q8_0/lm_head_m8
+                        time:   [1.0054 ms 1.0100 ms 1.0138 ms]
+Found 2 outliers among 50 measurements (4.00%)
+  2 (4.00%) high severe
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m16
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m16: Warming up for 3.0000 s
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m16: Collecting 50 samples in estimated 6.7209 s (3825 iterations)
+Benchmarking metal_qmatmul_rows_Q8_0/lm_head_m16: Analyzing
+metal_qmatmul_rows_Q8_0/lm_head_m16
+                        time:   [1.7455 ms 1.7533 ms 1.7597 ms]
+Found 2 outliers among 50 measurements (4.00%)
+  1 (2.00%) high mild
+  1 (2.00%) high severe
+
+
+thread 'main' (4968433) panicked at candle-core/benches/benchmarks/where_cond.rs:80:10:
+called `Result::unwrap()` on an `Err` value: Metal contiguous to_dtype F64 F32 not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: bench failed, to rerun pass `-p candle-core --bench bench_main`
