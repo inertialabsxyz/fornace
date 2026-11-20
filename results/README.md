@@ -5,6 +5,7 @@ the result with a number. To write a result, use [TEMPLATE.md](TEMPLATE.md).
 
 | Date | Title | Commit | Link |
 |---|---|---|---|
+| 2026-11-20 | A tile kernel makes Candle's Q4_0 matmuls for 8 rows 2× faster on Metal, and lifts Fornace's agent load at Q4 from 318 to 436 tok/s | `6996c8f`, `c0d8372`, `18a032a` | [result](2026-11-20-metal-gap-qwen2-metal.md) |
 | 2026-11-13 | A scheduler cuts the slowest first token of 8 agent requests to Qwen2 on Metal from 8.3 s to 0.9 s, and doubles the tokens per second at BF16 | `105e894`, `38171e7` | [result](2026-11-13-scheduler-qwen2-metal.md) |
 | 2026-11-13 | With 8 requests at once from one agent, llama.cpp gives 2.5× the tokens per second of Fornace on Metal; with one request, it is only 1.1× faster | `a1fffdc`, `160e5c2` | [result](2026-11-13-comparison-qwen2-metal.md) |
 | 2026-11-12 | A 0.5B draft makes Qwen2.5-1.5B decode 1.35× faster on code and 38 % slower on prose on Metal | `9673634` | [result](2026-11-12-speculative-decoding-qwen2-metal.md) |
