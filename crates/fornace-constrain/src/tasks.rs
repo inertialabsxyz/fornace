@@ -104,7 +104,7 @@ impl Action {
     }
 
     /// The command of the action.
-    fn command(&self) -> Command {
+    pub fn command(&self) -> Command {
         match self.clone() {
             Action::Capture { payment, amount } => Command::Capture { payment, amount },
             Action::Void { payment } => Command::Void { payment },
