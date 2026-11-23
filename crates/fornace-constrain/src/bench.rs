@@ -10,6 +10,7 @@ use crate::ledger::{Command, Ledger, Step};
 use crate::reject::{self, MAX_SAMPLES, Rejected};
 use crate::rng::Rng;
 use crate::tasks::{Action, Class, Task};
+use crate::workaround::{self, Workaround};
 
 /// The largest number of generations for one task, failed ones also. A
 /// usual task succeeds with at most 2 × 4 + 2 = 10 commands.
@@ -95,6 +96,10 @@ pub struct Output {
     /// rejected samples. The model did not write this command.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fallback: bool,
+    /// Workarounds 3 and 4: the change of the output to `ASK_OPERATOR`.
+    /// `text` is the output of the model before the change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_by: Option<String>,
 }
 
 /// The class of the first command of a trap task, as in the outcome table
@@ -147,6 +152,9 @@ pub struct Outcome {
     pub task: usize,
     pub seed: u64,
     pub config: Config,
+    /// The workaround of C. Not in the files with no workaround.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workaround: Option<Workaround>,
     pub model: String,
     pub class: Class,
     pub prefix_id: bool,
@@ -210,6 +218,12 @@ pub trait Model {
 /// The user message for the next command: the request, the full state,
 /// and each output so far with the answer of the ledger.
 pub fn user_message(request: &str, state: &Ledger, outputs: &[Output]) -> String {
+    message(request, state, outputs, "")
+}
+
+/// [`user_message`] with `extra` after the payments: the limits of
+/// workaround 1.
+fn message(request: &str, state: &Ledger, outputs: &[Output], extra: &str) -> String {
     let mut text = format!("Request: {request}\n\nLedger state (amounts in cents):\nAccounts:\n");
     for (id, balance) in &state.accounts {
         text.push_str(&format!("{id}: balance {balance}\n"));
@@ -221,6 +235,7 @@ pub fn user_message(request: &str, state: &Ledger, outputs: &[Output]) -> String
             p.status, p.authorized, p.captured, p.refunded, p.account
         ));
     }
+    text.push_str(extra);
     text.push_str("\nCommands sent:\n");
     if outputs.is_empty() {
         text.push_str("none\n");
@@ -288,7 +303,9 @@ pub fn sampler_seed(seed: u64, task: usize, generation: usize) -> u64 {
 
 /// Runs one task with one seed. The result has the outcome and a timing
 /// for each generation. With `faults`, the fault test ([`crate::fault`])
-/// changes the state in the selected generations.
+/// changes the state in the selected generations. `workaround` is a
+/// workaround of C ([`crate::workaround`]). The model must give the grammar
+/// of the workaround also.
 pub fn run_task(
     model: &mut dyn Model,
     model_name: &str,
@@ -296,6 +313,7 @@ pub fn run_task(
     task: &Task,
     seed: u64,
     faults: bool,
+    workaround: Option<Workaround>,
 ) -> anyhow::Result<(Outcome, Vec<Timing>)> {
     let request = task
         .request
@@ -306,12 +324,22 @@ pub fn run_task(
         !(faults && config == Config::D),
         "the fault test does not run with D"
     );
+    anyhow::ensure!(
+        workaround.is_none() || config == Config::C,
+        "a workaround is a change to C"
+    );
+    let system = workaround::system(workaround);
     let mut state = task.start.clone();
     let mut outputs: Vec<Output> = Vec::new();
     let mut timings = Vec::new();
     let mut ended_by = "limit";
     for generation in 0..MAX_GENERATIONS {
-        let prompt = crate::chat::chat_prompt(SYSTEM, &user_message(request, &state, &outputs));
+        let limits = match workaround {
+            Some(Workaround::Limits) => workaround::limits_text(&state),
+            _ => String::new(),
+        };
+        let prompt =
+            crate::chat::chat_prompt(&system, &message(request, &state, &outputs, &limits));
         let generation_seed = sampler_seed(seed, task.id, generation);
         let samples = if config == Config::D { MAX_SAMPLES } else { 1 };
         let mut rejected = Vec::new();
@@ -378,13 +406,28 @@ pub fn run_task(
             let text = serde_json::to_string(&command).expect("a command serializes");
             (text, 0, None, Some(command))
         });
-        let parsed = match checked {
-            Some(command) => Ok(command),
-            None => parse_command(&text),
+        let mut changed_by = None;
+        let parsed = match (checked, workaround) {
+            (Some(command), _) => Ok(command),
+            (None, Some(Workaround::Requested)) => {
+                workaround::parse_requested(&text).map(|(command, changed)| {
+                    if changed {
+                        changed_by = Some("requested above the limit".to_string());
+                    }
+                    command
+                })
+            }
+            (None, _) => parse_command(&text),
         };
         let (command, answer) = match parsed {
             Err(reason) => (None, Answer::ParseFailure(reason)),
-            Ok(command) => {
+            Ok(mut command) => {
+                if workaround == Some(Workaround::Compare)
+                    && let Some(ask) = workaround::compare(&command, request)
+                {
+                    changed_by = Some("amount not in the request".to_string());
+                    command = ask;
+                }
                 let answer = match state.execute(&command) {
                     Ok(Step::Continue) => Answer::Ok,
                     Ok(Step::End) => Answer::End,
@@ -410,6 +453,7 @@ pub fn run_task(
             samples: (config == Config::D).then_some(rejected.len() + usize::from(!fallback)),
             rejected,
             fallback,
+            changed_by,
         });
         if let Some(end) = end {
             ended_by = end;
@@ -421,6 +465,7 @@ pub fn run_task(
         task: task.id,
         seed,
         config,
+        workaround,
         model: model_name.to_string(),
         class: task.class,
         prefix_id: task.prefix_id,
@@ -647,9 +692,17 @@ mod tests {
     }
 
     fn run(task: &Task, script: Vec<&'static str>) -> Outcome {
-        run_task(&mut Script(script), "script", Config::A, task, 1, false)
-            .expect("run")
-            .0
+        run_task(
+            &mut Script(script),
+            "script",
+            Config::A,
+            task,
+            1,
+            false,
+            None,
+        )
+        .expect("run")
+        .0
     }
 
     fn command_text(command: &Command) -> &'static str {
@@ -702,6 +755,7 @@ mod tests {
                 samples: None,
                 rejected: Vec::new(),
                 fallback: false,
+                changed_by: None,
             },
             Output {
                 text: "I will refund".to_string(),
@@ -712,6 +766,7 @@ mod tests {
                 samples: None,
                 rejected: Vec::new(),
                 fallback: false,
+                changed_by: None,
             },
         ];
         let text = user_message("a request", &task.start, &outputs);
@@ -855,6 +910,7 @@ mod tests {
             samples: None,
             rejected: Vec::new(),
             fallback: false,
+            changed_by: None,
         };
         assert_eq!(unit_errors(&task, &[output(40), output(400_000)]), 2);
         assert_eq!(unit_errors(&task, &[output(4_000), output(400)]), 0);
@@ -892,6 +948,7 @@ mod tests {
             &task,
             seed,
             true,
+            None,
         )
         .unwrap();
         let fault = outcome.outputs[0]
@@ -905,8 +962,16 @@ mod tests {
                 .token
                 .is_some_and(|t| t < outcome.outputs[0].text.len())
         );
-        let (clean, _) =
-            run_task(&mut Script(script), "script", Config::C, &task, seed, false).unwrap();
+        let (clean, _) = run_task(
+            &mut Script(script),
+            "script",
+            Config::C,
+            &task,
+            seed,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(clean.outputs[0].answer, Answer::Ok);
         assert!(clean.outputs.iter().all(|o| o.fault.is_none()));
     }
@@ -940,8 +1005,18 @@ mod tests {
             format!(r#"{{"cmd":"TRANSFER","from":"{from}","to":"{to}","amount":1}}"#)
                 .into_boxed_str(),
         );
-        let run_d =
-            |script| run_task(&mut Script(script), "script", Config::D, &task, 1, false).unwrap();
+        let run_d = |script| {
+            run_task(
+                &mut Script(script),
+                "script",
+                Config::D,
+                &task,
+                1,
+                false,
+                None,
+            )
+            .unwrap()
+        };
 
         let (outcome, timings) = run_d(vec![over, "{\"cmd\":", ok, "{\"cmd\":\"DONE\"}"]);
         let first = &outcome.outputs[0];
@@ -992,6 +1067,7 @@ mod tests {
             &task,
             1,
             false,
+            None,
         )
         .unwrap();
         let line = serde_json::to_string(&outcome).unwrap();
@@ -1003,5 +1079,94 @@ mod tests {
                 .unwrap()
                 .contains("sample")
         );
+    }
+
+    fn run_with(task: &Task, workaround: Workaround, script: Vec<&'static str>) -> Outcome {
+        run_task(
+            &mut Script(script),
+            "script",
+            Config::C,
+            task,
+            1,
+            false,
+            Some(workaround),
+        )
+        .expect("run")
+        .0
+    }
+
+    /// Workarounds 3 and 4 change a shortened value and a requested amount
+    /// above the limit to `ASK_OPERATOR`. The requested amount passes.
+    #[test]
+    fn workarounds_3_and_4_ask_the_operator() {
+        let mut task = first_trap(Class::OverLimit, "refund");
+        let Action::Refund { payment, amount } = task.actions[0].clone() else {
+            unreachable!()
+        };
+        task.request = Some(format!("refund {amount} cents of payment {payment}"));
+        let short = |a: u64| -> &'static str {
+            Box::leak(
+                format!(r#"{{"cmd":"REFUND","payment":"{payment}","amount":{a}}}"#)
+                    .into_boxed_str(),
+            )
+        };
+
+        let outcome = run_with(&task, Workaround::Compare, vec![short(amount / 10)]);
+        assert_eq!(outcome.outputs.len(), 1);
+        assert_eq!(
+            outcome.outputs[0].changed_by.as_deref(),
+            Some("amount not in the request")
+        );
+        assert_eq!(outcome.outputs[0].text, short(amount / 10));
+        assert!(outcome.score.success);
+        assert_eq!(outcome.workaround, Some(Workaround::Compare));
+        // The requested amount stays, and the ledger refuses it.
+        let outcome = run_with(
+            &task,
+            Workaround::Compare,
+            vec![short(amount), "{\"cmd\":\"DONE\"}"],
+        );
+        assert_eq!(outcome.outputs[0].changed_by, None);
+        assert!(matches!(outcome.outputs[0].answer, Answer::Refused(_)));
+
+        let over: &'static str = Box::leak(
+            format!(r#"{{"cmd":"REFUND","payment":"{payment}","requested":{amount}}}"#)
+                .into_boxed_str(),
+        );
+        let outcome = run_with(&task, Workaround::Requested, vec![over]);
+        assert_eq!(
+            outcome.outputs[0].changed_by.as_deref(),
+            Some("requested above the limit")
+        );
+        assert_eq!(outcome.ended_by, "ask_operator");
+        assert!(outcome.score.success);
+    }
+
+    #[test]
+    fn workaround_1_puts_the_limits_in_the_prompt() {
+        let task = task_with_request(0);
+        let limits = workaround::limits_text(&task.start);
+        let text = message("a request", &task.start, &[], &limits);
+        assert!(text.contains("Limits (amounts in cents):\n"));
+        assert!(text.find("Limits").unwrap() < text.find("Commands sent").unwrap());
+        assert_eq!(
+            user_message("a request", &task.start, &[]),
+            message("a request", &task.start, &[], "")
+        );
+    }
+
+    #[test]
+    fn a_workaround_is_for_c_only() {
+        let task = task_with_request(0);
+        let result = run_task(
+            &mut Script(vec![]),
+            "script",
+            Config::B,
+            &task,
+            1,
+            false,
+            Some(Workaround::Limits),
+        );
+        assert!(result.is_err());
     }
 }

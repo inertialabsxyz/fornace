@@ -124,14 +124,43 @@ impl Rules for LedgerRules {
 /// The question of `ASK_OPERATOR`, as in [`crate::grammar::GRAMMAR_B`].
 const QUESTION: &str = r#"/[^"\\\x00-\x1f]{1,100}/"#;
 
+/// The largest amount that the grammar of B permits: 7 digits.
+pub const MAX_WRITTEN: u32 = 9_999_999;
+
 /// The Lark grammar of `params`, in the byte form of the system message.
 /// Each branch is one rule: the fixed bytes up to the amount, then the
 /// range pattern of the branch.
 pub fn lark(params: &GrammarParams) -> String {
+    lark_with(params, false)
+}
+
+/// The grammar of workaround 4 (brief, step 4). Each command with an amount
+/// has a `"requested"` field before the amount, with no range limit. If
+/// `requested` is in the range of the branch, the amount follows, in the
+/// range. If it is above the range, the grammar permits only the end of
+/// the object: `{"cmd":"REFUND","payment":"p_17","requested":4000}`. The
+/// bench changes this form to `ASK_OPERATOR`
+/// ([`crate::workaround::parse_requested`]).
+pub fn lark_requested(params: &GrammarParams) -> String {
+    lark_with(params, true)
+}
+
+fn lark_with(params: &GrammarParams, requested: bool) -> String {
     let mut rules = Vec::new();
+    // The end of the rule after the ID: the rest of the literal, the range,
+    // and the `}`. With `requested`, one pattern holds both continuations,
+    // so that the lexer has no two terminals with the same prefix.
     let amount = |branch: &Branch| {
         let (lo, hi) = branch.amount.expect("a command with an amount");
-        format!("/({})/", range_pattern(lo, hi))
+        if !requested {
+            return format!(r#"\",\"amount\":" /({})/ "}}""#, range_pattern(lo, hi));
+        }
+        let range = range_pattern(lo, hi);
+        let mut tail = format!(r#"({range}),"amount":({range})\}}"#);
+        if hi < MAX_WRITTEN {
+            tail.push_str(&format!(r#"|({})\}}"#, range_pattern(hi + 1, MAX_WRITTEN)));
+        }
+        format!(r#"\",\"requested\":" /{tail}/"#)
     };
     for &name in &params.commands {
         let branches = params.branches.get(name).map(Vec::as_slice).unwrap_or(&[]);
@@ -144,7 +173,7 @@ pub fn lark(params: &GrammarParams) -> String {
                 };
                 for b in branches {
                     rules.push(format!(
-                        r#""{{\"cmd\":\"{name}\",\"{field}\":\"{}\",\"amount\":" {} "}}""#,
+                        r#""{{\"cmd\":\"{name}\",\"{field}\":\"{}{}"#,
                         b.id,
                         amount(b)
                     ));
@@ -162,7 +191,7 @@ pub fn lark(params: &GrammarParams) -> String {
                 for b in branches {
                     for to in &b.second_ids {
                         rules.push(format!(
-                            r#""{{\"cmd\":\"TRANSFER\",\"from\":\"{}\",\"to\":\"{to}\",\"amount\":" {} "}}""#,
+                            r#""{{\"cmd\":\"TRANSFER\",\"from\":\"{}\",\"to\":\"{to}{}"#,
                             b.id,
                             amount(b)
                         ));

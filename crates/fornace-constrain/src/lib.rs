@@ -15,3 +15,4 @@ pub mod rng;
 pub mod runs;
 pub mod tasks;
 pub mod trie;
+pub mod workaround;

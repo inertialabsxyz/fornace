@@ -13,11 +13,12 @@ use clap::Parser;
 use fornace_constrain::bench::{
     Answer, Config, Generation, MAX_COMMAND_TOKENS, Model, json_end, run_task,
 };
-use fornace_constrain::compile::{LedgerRules, Rules, lark};
+use fornace_constrain::compile::{LedgerRules, Rules, lark, lark_requested};
 use fornace_constrain::grammar::{GRAMMAR_B, Grammars};
 use fornace_constrain::ledger::Ledger;
 use fornace_constrain::runs::{commit, parse_ids, today, writer};
 use fornace_constrain::tasks::Task;
+use fornace_constrain::workaround::{Workaround, params_all_ids};
 use fornace_engine::{DeviceKind, Dtype, Engine, GenerateOptions, LoadConfig};
 
 /// The temperature of the bench (brief, "Fixed conditions").
@@ -53,6 +54,9 @@ struct Args {
     /// ID field (brief, step 3). Give a `--tag` also.
     #[arg(long)]
     fault: bool,
+    /// A workaround of C (brief, step 4). The file name gets `-w<number>`.
+    #[arg(long, value_enum)]
+    workaround: Option<Workaround>,
 }
 
 struct EngineModel {
@@ -60,6 +64,7 @@ struct EngineModel {
     config: Config,
     /// The parser factory. `None` for A.
     grammars: Option<Grammars>,
+    workaround: Option<Workaround>,
 }
 
 impl Model for EngineModel {
@@ -92,7 +97,13 @@ impl Model for EngineModel {
             Config::B | Config::D => Some(GRAMMAR_B.to_string()),
             // The grammar of the state now, built and compiled again for
             // each command. The compile time includes both.
-            Config::C => Some(lark(&LedgerRules.params(state))),
+            Config::C => Some(match self.workaround {
+                Some(Workaround::Requested) => lark_requested(&LedgerRules.params(state)),
+                Some(Workaround::AllIds) => lark(&params_all_ids(state)),
+                Some(Workaround::Limits | Workaround::Compare) | None => {
+                    lark(&LedgerRules.params(state))
+                }
+            }),
         };
         let (report, mask_ms_per_token, compile_ms) = match (&self.grammars, grammar) {
             (None, _) | (_, None) => (
@@ -149,7 +160,13 @@ fn main() -> Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("model")
         .to_string();
-    let config_name = format!("{:?}", args.config).to_lowercase();
+    if args.workaround.is_some() && args.config != Config::C {
+        bail!("--workaround is a change to --config c");
+    }
+    let mut config_name = format!("{:?}", args.config).to_lowercase();
+    if let Some(w) = args.workaround {
+        config_name.push_str(&format!("-w{}", w.number()));
+    }
     let mut stem = format!("{}-{}-{config_name}-{model_name}", today(), commit());
     if let Some(tag) = &args.tag {
         stem.push('-');
@@ -184,17 +201,27 @@ fn main() -> Result<()> {
         engine,
         config: args.config,
         grammars,
+        workaround: args.workaround,
     };
     let (mut runs, mut successes) = (0, 0);
     // The refused commands, and the fault test: selected, changed, stopped.
     let (mut refused, mut selected, mut changed, mut stopped) = (0, 0, 0, 0);
     // D: the commands, the samples, the rejected samples, the fallbacks.
     let (mut commands, mut samples, mut rejected, mut fallbacks) = (0, 0, 0, 0);
+    // Workarounds 3 and 4: the outputs changed to ASK_OPERATOR.
+    let mut changed_to_ask = 0;
     for &id in &ids {
         let task = all.get(id).with_context(|| format!("no task {id}"))?;
         for &seed in &args.seeds {
-            let (outcome, task_timings) =
-                run_task(&mut model, &model_name, args.config, task, seed, args.fault)?;
+            let (outcome, task_timings) = run_task(
+                &mut model,
+                &model_name,
+                args.config,
+                task,
+                seed,
+                args.fault,
+                args.workaround,
+            )?;
             writeln!(outcomes, "{}", serde_json::to_string(&outcome)?)?;
             for timing in &task_timings {
                 writeln!(timings, "{}", serde_json::to_string(timing)?)?;
@@ -203,6 +230,7 @@ fn main() -> Result<()> {
             successes += usize::from(outcome.score.success);
             for output in &outcome.outputs {
                 refused += usize::from(matches!(output.answer, Answer::Refused(_)));
+                changed_to_ask += usize::from(output.changed_by.is_some());
                 if let Some(n) = output.samples {
                     commands += 1;
                     samples += n;
@@ -226,6 +254,12 @@ fn main() -> Result<()> {
     outcomes.flush()?;
     timings.flush()?;
     println!("{stem}: task success {successes} of {runs}, refused commands {refused}");
+    if let Some(w) = args.workaround {
+        println!(
+            "workaround {}: {changed_to_ask} outputs changed to ASK_OPERATOR",
+            w.number()
+        );
+    }
     if args.config == Config::D {
         println!(
             "rejection: {commands} commands, {samples} samples, {rejected} rejected, \
