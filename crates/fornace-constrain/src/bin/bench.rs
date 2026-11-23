@@ -89,7 +89,7 @@ impl Model for EngineModel {
         };
         let grammar = match self.config {
             Config::A => None,
-            Config::B => Some(GRAMMAR_B.to_string()),
+            Config::B | Config::D => Some(GRAMMAR_B.to_string()),
             // The grammar of the state now, built and compiled again for
             // each command. The compile time includes both.
             Config::C => Some(lark(&LedgerRules.params(state))),
@@ -178,7 +178,7 @@ fn main() -> Result<()> {
     let engine = Engine::load(&config).context("load the model")?;
     let grammars = match args.config {
         Config::A => None,
-        Config::B | Config::C => Some(grammars(&args.model)?),
+        Config::B | Config::C | Config::D => Some(grammars(&args.model)?),
     };
     let mut model = EngineModel {
         engine,
@@ -188,6 +188,8 @@ fn main() -> Result<()> {
     let (mut runs, mut successes) = (0, 0);
     // The refused commands, and the fault test: selected, changed, stopped.
     let (mut refused, mut selected, mut changed, mut stopped) = (0, 0, 0, 0);
+    // D: the commands, the samples, the rejected samples, the fallbacks.
+    let (mut commands, mut samples, mut rejected, mut fallbacks) = (0, 0, 0, 0);
     for &id in &ids {
         let task = all.get(id).with_context(|| format!("no task {id}"))?;
         for &seed in &args.seeds {
@@ -201,6 +203,12 @@ fn main() -> Result<()> {
             successes += usize::from(outcome.score.success);
             for output in &outcome.outputs {
                 refused += usize::from(matches!(output.answer, Answer::Refused(_)));
+                if let Some(n) = output.samples {
+                    commands += 1;
+                    samples += n;
+                    rejected += output.rejected.len();
+                    fallbacks += usize::from(output.fallback);
+                }
                 if let Some(fault) = &output.fault {
                     selected += 1;
                     changed += usize::from(fault.change.is_some());
@@ -218,6 +226,12 @@ fn main() -> Result<()> {
     outcomes.flush()?;
     timings.flush()?;
     println!("{stem}: task success {successes} of {runs}, refused commands {refused}");
+    if args.config == Config::D {
+        println!(
+            "rejection: {commands} commands, {samples} samples, {rejected} rejected, \
+             {fallbacks} fallbacks to ASK_OPERATOR"
+        );
+    }
     if args.fault {
         println!(
             "fault test: {selected} generations selected, {changed} changed, \

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fault::{self, Fault};
 use crate::ledger::{Command, Ledger, Step};
+use crate::reject::{self, MAX_SAMPLES, Rejected};
 use crate::rng::Rng;
 use crate::tasks::{Action, Class, Task};
 
@@ -28,6 +29,9 @@ pub enum Config {
     /// The grammar for each state ([`crate::compile`]), compiled again
     /// before each command.
     C,
+    /// Rejection ([`crate::reject`]): the grammar of B, the check with
+    /// `permits`, at most five samples, then `ASK_OPERATOR`.
+    D,
 }
 
 /// The system message: the commands and the guards.
@@ -79,6 +83,18 @@ pub struct Output {
     /// file of a run with no fault test.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<Fault>,
+    /// D: the number of samples for this command, the rejected ones also.
+    /// Not in the files of A, B, and C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<usize>,
+    /// D: the samples that the check refused, in order. They are not in
+    /// the context of the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<Rejected>,
+    /// D: the bench sent [`reject::fallback`] after [`MAX_SAMPLES`]
+    /// rejected samples. The model did not write this command.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback: bool,
 }
 
 /// The class of the first command of a trap task, as in the outcome table
@@ -138,7 +154,8 @@ pub struct Outcome {
     /// `done`, `ask_operator`, or `limit`.
     pub ended_by: String,
     pub score: Score,
-    /// All generated tokens of the task, of failed outputs also.
+    /// All generated tokens of the task, of failed outputs and rejected
+    /// samples also.
     pub tokens: usize,
 }
 
@@ -148,6 +165,10 @@ pub struct Timing {
     pub task: usize,
     pub seed: u64,
     pub generation: usize,
+    /// D: the sample of the generation, from 0. Not in the files of A, B,
+    /// and C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<usize>,
     pub prompt_tokens: usize,
     pub generated_tokens: usize,
     pub prefill_ms: f64,
@@ -280,6 +301,11 @@ pub fn run_task(
         .request
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("task {} has no request", task.id))?;
+    // The fault test is for the mask of C (brief, step 3), not for D.
+    anyhow::ensure!(
+        !(faults && config == Config::D),
+        "the fault test does not run with D"
+    );
     let mut state = task.start.clone();
     let mut outputs: Vec<Output> = Vec::new();
     let mut timings = Vec::new();
@@ -287,41 +313,76 @@ pub fn run_task(
     for generation in 0..MAX_GENERATIONS {
         let prompt = crate::chat::chat_prompt(SYSTEM, &user_message(request, &state, &outputs));
         let generation_seed = sampler_seed(seed, task.id, generation);
-        let selected = faults && fault::selected(generation_seed);
-        let mut tokens_so_far = 0;
-        let mut written: Option<(usize, String, String)> = None;
-        let mut watch = |text: &str| {
-            tokens_so_far += 1;
-            if selected
-                && written.is_none()
-                && let Some((name, id)) = fault::written_id(text)
-            {
-                written = Some((tokens_so_far, name.to_string(), id.to_string()));
+        let samples = if config == Config::D { MAX_SAMPLES } else { 1 };
+        let mut rejected = Vec::new();
+        // The kept sample: the text, the tokens, the fault, and the command
+        // that the check of D permits.
+        let mut kept = None;
+        for sample in 0..samples {
+            let sample_seed = reject::sample_seed(generation_seed, sample);
+            let selected = faults && fault::selected(sample_seed);
+            let mut tokens_so_far = 0;
+            let mut written: Option<(usize, String, String)> = None;
+            let mut watch = |text: &str| {
+                tokens_so_far += 1;
+                if selected
+                    && written.is_none()
+                    && let Some((name, id)) = fault::written_id(text)
+                {
+                    written = Some((tokens_so_far, name.to_string(), id.to_string()));
+                }
+            };
+            let result = model.command(&prompt, sample_seed, &state, &mut watch)?;
+            // The state changes after the ID field and before the check. The
+            // grammar of this generation is from the old state.
+            let fault = selected.then(|| Fault {
+                token: written.as_ref().map(|w| w.0),
+                change: written
+                    .as_ref()
+                    .and_then(|(_, name, id)| fault::apply(&mut state, name, id)),
+                stopped: false,
+            });
+            timings.push(Timing {
+                task: task.id,
+                seed,
+                generation,
+                sample: (config == Config::D).then_some(sample),
+                prompt_tokens: result.prompt_tokens,
+                generated_tokens: result.generated_tokens,
+                prefill_ms: result.prefill_ms,
+                decode_ms: result.decode_ms,
+                mask_ms_per_token: result.mask_ms_per_token,
+                compile_ms: result.compile_ms,
+            });
+            let text = result.text.trim().to_string();
+            let tokens = result.generated_tokens;
+            if config == Config::D {
+                match reject::check(&state, &text) {
+                    Ok(command) => {
+                        kept = Some((text, tokens, fault, Some(command)));
+                        break;
+                    }
+                    Err(reason) => rejected.push(Rejected {
+                        text,
+                        tokens,
+                        reason,
+                    }),
+                }
+            } else {
+                kept = Some((text, tokens, fault, None));
             }
+        }
+        let fallback = kept.is_none();
+        let (text, tokens, mut fault, checked) = kept.unwrap_or_else(|| {
+            let command = reject::fallback();
+            let text = serde_json::to_string(&command).expect("a command serializes");
+            (text, 0, None, Some(command))
+        });
+        let parsed = match checked {
+            Some(command) => Ok(command),
+            None => parse_command(&text),
         };
-        let result = model.command(&prompt, generation_seed, &state, &mut watch)?;
-        // The state changes after the ID field and before the check. The
-        // grammar of this generation is from the old state.
-        let mut fault = selected.then(|| Fault {
-            token: written.as_ref().map(|w| w.0),
-            change: written
-                .as_ref()
-                .and_then(|(_, name, id)| fault::apply(&mut state, name, id)),
-            stopped: false,
-        });
-        timings.push(Timing {
-            task: task.id,
-            seed,
-            generation,
-            prompt_tokens: result.prompt_tokens,
-            generated_tokens: result.generated_tokens,
-            prefill_ms: result.prefill_ms,
-            decode_ms: result.decode_ms,
-            mask_ms_per_token: result.mask_ms_per_token,
-            compile_ms: result.compile_ms,
-        });
-        let text = result.text.trim().to_string();
-        let (command, answer) = match parse_command(&text) {
+        let (command, answer) = match parsed {
             Err(reason) => (None, Answer::ParseFailure(reason)),
             Ok(command) => {
                 let answer = match state.execute(&command) {
@@ -344,8 +405,11 @@ pub fn run_task(
             text,
             command,
             answer,
-            tokens: result.generated_tokens,
+            tokens,
             fault,
+            samples: (config == Config::D).then_some(rejected.len() + usize::from(!fallback)),
+            rejected,
+            fallback,
         });
         if let Some(end) = end {
             ended_by = end;
@@ -360,7 +424,10 @@ pub fn run_task(
         model: model_name.to_string(),
         class: task.class,
         prefix_id: task.prefix_id,
-        tokens: outputs.iter().map(|o| o.tokens).sum(),
+        tokens: outputs
+            .iter()
+            .map(|o| o.tokens + o.rejected.iter().map(|r| r.tokens).sum::<usize>())
+            .sum(),
         ended_by: ended_by.to_string(),
         outputs,
         score,
@@ -632,6 +699,9 @@ mod tests {
                 answer: Answer::Refused("payment p_99 does not exist".to_string()),
                 tokens: 9,
                 fault: None,
+                samples: None,
+                rejected: Vec::new(),
+                fallback: false,
             },
             Output {
                 text: "I will refund".to_string(),
@@ -639,6 +709,9 @@ mod tests {
                 answer: Answer::ParseFailure("expected value".to_string()),
                 tokens: 3,
                 fault: None,
+                samples: None,
+                rejected: Vec::new(),
+                fallback: false,
             },
         ];
         let text = user_message("a request", &task.start, &outputs);
@@ -779,6 +852,9 @@ mod tests {
             answer: Answer::Ok,
             tokens: 1,
             fault: None,
+            samples: None,
+            rejected: Vec::new(),
+            fallback: false,
         };
         assert_eq!(unit_errors(&task, &[output(40), output(400_000)]), 2);
         assert_eq!(unit_errors(&task, &[output(4_000), output(400)]), 0);
@@ -833,5 +909,99 @@ mod tests {
             run_task(&mut Script(script), "script", Config::C, &task, seed, false).unwrap();
         assert_eq!(clean.outputs[0].answer, Answer::Ok);
         assert!(clean.outputs.iter().all(|o| o.fault.is_none()));
+    }
+
+    /// D discards a refused sample and samples again. After five refused
+    /// samples, it sends `ASK_OPERATOR`. No refused command gets to
+    /// `execute`.
+    #[test]
+    fn rejection_samples_again_then_asks_the_operator() {
+        let task = task_with_request(0);
+        let (from, balance) = task
+            .start
+            .accounts
+            .iter()
+            .find(|(_, b)| **b > 0)
+            .expect("an account with a balance");
+        let to = task
+            .start
+            .accounts
+            .keys()
+            .find(|a| *a != from)
+            .expect("two accounts");
+        let over: &str = Box::leak(
+            format!(
+                r#"{{"cmd":"TRANSFER","from":"{from}","to":"{to}","amount":{}}}"#,
+                balance + 1
+            )
+            .into_boxed_str(),
+        );
+        let ok: &str = Box::leak(
+            format!(r#"{{"cmd":"TRANSFER","from":"{from}","to":"{to}","amount":1}}"#)
+                .into_boxed_str(),
+        );
+        let run_d =
+            |script| run_task(&mut Script(script), "script", Config::D, &task, 1, false).unwrap();
+
+        let (outcome, timings) = run_d(vec![over, "{\"cmd\":", ok, "{\"cmd\":\"DONE\"}"]);
+        let first = &outcome.outputs[0];
+        assert_eq!(first.samples, Some(3));
+        assert_eq!(first.rejected.len(), 2);
+        assert!(matches!(first.rejected[0].reason, Answer::Refused(_)));
+        assert!(matches!(first.rejected[1].reason, Answer::ParseFailure(_)));
+        assert_eq!(first.answer, Answer::Ok);
+        assert!(!first.fallback);
+        assert_eq!(outcome.outputs[1].samples, Some(1));
+        assert_eq!(timings.len(), 4);
+        assert_eq!(
+            timings.iter().map(|t| t.sample).collect::<Vec<_>>(),
+            [Some(0), Some(1), Some(2), Some(0)]
+        );
+        let all_tokens = over.len() + "{\"cmd\":".len() + ok.len() + "{\"cmd\":\"DONE\"}".len();
+        assert_eq!(outcome.tokens, all_tokens);
+
+        let (outcome, _) = run_d(vec![over; 6]);
+        assert_eq!(outcome.outputs.len(), 1);
+        let only = &outcome.outputs[0];
+        assert!(only.fallback);
+        assert_eq!(only.samples, Some(MAX_SAMPLES));
+        assert_eq!(only.rejected.len(), MAX_SAMPLES);
+        assert_eq!(only.command, Some(reject::fallback()));
+        assert_eq!(only.answer, Answer::End);
+        assert_eq!(outcome.ended_by, "ask_operator");
+        assert_eq!(outcome.tokens, MAX_SAMPLES * over.len());
+
+        for outcome in [run_d(vec![over; 6]).0, run_d(vec![over, ok, "x"]).0] {
+            assert!(
+                outcome
+                    .outputs
+                    .iter()
+                    .all(|o| !matches!(o.answer, Answer::Refused(_)))
+            );
+        }
+    }
+
+    /// The new fields of D are not in the files of A, B, and C.
+    #[test]
+    fn the_files_of_a_b_and_c_keep_their_form() {
+        let task = task_with_request(0);
+        let (outcome, timings) = run_task(
+            &mut Script(vec!["{\"cmd\":\"DONE\"}"]),
+            "script",
+            Config::C,
+            &task,
+            1,
+            false,
+        )
+        .unwrap();
+        let line = serde_json::to_string(&outcome).unwrap();
+        for field in ["samples", "rejected", "fallback"] {
+            assert!(!line.contains(field), "{field} in {line}");
+        }
+        assert!(
+            !serde_json::to_string(&timings[0])
+                .unwrap()
+                .contains("sample")
+        );
     }
 }

@@ -10,6 +10,7 @@ pub mod fault;
 pub mod grammar;
 pub mod ledger;
 pub mod range;
+pub mod reject;
 pub mod rng;
 pub mod runs;
 pub mod tasks;
