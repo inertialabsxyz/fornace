@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fault::{self, Fault};
 use crate::ledger::{Command, Ledger, Step};
+use crate::precheck;
 use crate::pressure::{self, StepPressure};
 use crate::reject::{self, MAX_SAMPLES, Rejected};
 use crate::rng::Rng;
@@ -310,6 +311,18 @@ pub fn sampler_seed(seed: u64, task: usize, generation: usize) -> u64 {
     rng.next_u64()
 }
 
+/// The changes to a run of the bench. The default is no change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunOptions {
+    /// The fault test ([`crate::fault`]), for A, B, and C.
+    pub faults: bool,
+    /// A workaround of C ([`crate::workaround`]).
+    pub workaround: Option<Workaround>,
+    /// E3: check the request against the state before the model runs
+    /// ([`crate::precheck`]), for C and D.
+    pub request_check: bool,
+}
+
 /// Runs one task with one seed. The result has the outcome and a timing
 /// for each generation. With `faults`, the fault test ([`crate::fault`])
 /// changes the state in the selected generations. `workaround` is a
@@ -321,9 +334,13 @@ pub fn run_task(
     config: Config,
     task: &Task,
     seed: u64,
-    faults: bool,
-    workaround: Option<Workaround>,
+    options: &RunOptions,
 ) -> anyhow::Result<(Outcome, Vec<Timing>)> {
+    let RunOptions {
+        faults,
+        workaround,
+        request_check,
+    } = *options;
     let request = task
         .request
         .as_deref()
@@ -342,7 +359,22 @@ pub fn run_task(
     let mut outputs: Vec<Output> = Vec::new();
     let mut timings = Vec::new();
     let mut ended_by = "limit";
-    for generation in 0..MAX_GENERATIONS {
+    anyhow::ensure!(
+        !request_check || matches!(config, Config::C | Config::D),
+        "the request check is for C and D"
+    );
+    // E3: an alarm of the check ends the task before the model runs.
+    let alarm = request_check
+        && matches!(
+            precheck::check(request, &state),
+            precheck::Check::Refused(..)
+        );
+    if alarm {
+        outputs.push(precheck::alarm_output());
+        ended_by = "ask_operator";
+    }
+    let generations = if alarm { 0 } else { MAX_GENERATIONS };
+    for generation in 0..generations {
         let limits = match workaround {
             Some(Workaround::Limits) => workaround::limits_text(&state),
             _ => String::new(),
@@ -720,8 +752,7 @@ mod tests {
             Config::A,
             task,
             1,
-            false,
-            None,
+            &RunOptions::default(),
         )
         .expect("run")
         .0
@@ -969,8 +1000,10 @@ mod tests {
             Config::C,
             &task,
             seed,
-            true,
-            None,
+            &RunOptions {
+                faults: true,
+                ..RunOptions::default()
+            },
         )
         .unwrap();
         let fault = outcome.outputs[0]
@@ -990,8 +1023,7 @@ mod tests {
             Config::C,
             &task,
             seed,
-            false,
-            None,
+            &RunOptions::default(),
         )
         .unwrap();
         assert_eq!(clean.outputs[0].answer, Answer::Ok);
@@ -1034,8 +1066,7 @@ mod tests {
                 Config::D,
                 &task,
                 1,
-                false,
-                None,
+                &RunOptions::default(),
             )
             .unwrap()
         };
@@ -1088,8 +1119,7 @@ mod tests {
             Config::C,
             &task,
             1,
-            false,
-            None,
+            &RunOptions::default(),
         )
         .unwrap();
         let line = serde_json::to_string(&outcome).unwrap();
@@ -1110,8 +1140,10 @@ mod tests {
             Config::C,
             task,
             1,
-            false,
-            Some(workaround),
+            &RunOptions {
+                workaround: Some(workaround),
+                ..RunOptions::default()
+            },
         )
         .expect("run")
         .0
@@ -1177,6 +1209,50 @@ mod tests {
         );
     }
 
+    /// E3: a request that the state refuses ends the task before the model
+    /// runs. A request that the state permits, or that the reader cannot
+    /// read, goes to the model as before.
+    #[test]
+    fn the_request_check_asks_before_the_model_runs() {
+        let mut task = task_with_request(0);
+        let id = task
+            .start
+            .payments
+            .keys()
+            .next()
+            .expect("a payment")
+            .clone();
+        let _ = task.start.execute(&Command::Void {
+            payment: id.clone(),
+        });
+        let options = RunOptions {
+            request_check: true,
+            ..RunOptions::default()
+        };
+        let run = |task: &Task, config| {
+            run_task(
+                &mut Script(vec!["{\"cmd\":\"DONE\"}"]),
+                "script",
+                config,
+                task,
+                1,
+                &options,
+            )
+        };
+        task.request = Some(format!("Please void payment {id}."));
+        for config in [Config::C, Config::D] {
+            let (outcome, timings) = run(&task, config).expect("run");
+            assert_eq!(outcome.outputs, vec![precheck::alarm_output()]);
+            assert_eq!(outcome.ended_by, "ask_operator");
+            assert_eq!((outcome.tokens, timings.len()), (0, 0));
+        }
+        task.request = Some("please do the usual".to_string());
+        let (outcome, timings) = run(&task, Config::C).expect("run");
+        assert_eq!(outcome.ended_by, "done");
+        assert_eq!(timings.len(), 1);
+        assert!(run(&task, Config::B).is_err());
+    }
+
     #[test]
     fn a_workaround_is_for_c_only() {
         let task = task_with_request(0);
@@ -1186,8 +1262,10 @@ mod tests {
             Config::B,
             &task,
             1,
-            false,
-            Some(Workaround::Limits),
+            &RunOptions {
+                workaround: Some(Workaround::Limits),
+                ..RunOptions::default()
+            },
         );
         assert!(result.is_err());
     }

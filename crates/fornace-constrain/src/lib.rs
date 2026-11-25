@@ -9,6 +9,7 @@ pub mod compile;
 pub mod fault;
 pub mod grammar;
 pub mod ledger;
+pub mod precheck;
 pub mod pressure;
 pub mod range;
 pub mod reject;

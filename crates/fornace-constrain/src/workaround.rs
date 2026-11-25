@@ -83,6 +83,15 @@ pub fn limits_text(state: &Ledger) -> String {
 /// dollars. Another number is in cents. A number after `_` is part of an
 /// ID, and is not an amount. Commas between digits are part of the number.
 pub fn request_amounts(text: &str) -> Vec<u64> {
+    amount_spans(text)
+        .into_iter()
+        .map(|(_, amount)| amount)
+        .collect()
+}
+
+/// The amounts of [`request_amounts`], each with the byte position of its
+/// first digit.
+pub fn amount_spans(text: &str) -> Vec<(usize, u64)> {
     let bytes = text.as_bytes();
     let mut amounts = Vec::new();
     let mut i = 0;
@@ -98,6 +107,7 @@ pub fn request_amounts(text: &str) -> Vec<u64> {
             continue;
         }
         let dollars = i > 0 && bytes[i - 1] == b'$';
+        let start = i;
         let mut whole = 0u64;
         while i < bytes.len() {
             match bytes[i] {
@@ -118,11 +128,14 @@ pub fn request_amounts(text: &str) -> Vec<u64> {
             cents = Some(u64::from(bytes[i + 1] - b'0') * 10 + u64::from(bytes[i + 2] - b'0'));
             i += 3;
         }
-        amounts.push(if dollars {
-            whole.saturating_mul(100) + cents.unwrap_or(0)
-        } else {
-            whole
-        });
+        amounts.push((
+            start,
+            if dollars {
+                whole.saturating_mul(100) + cents.unwrap_or(0)
+            } else {
+                whole
+            },
+        ));
     }
     amounts
 }
