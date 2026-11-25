@@ -18,6 +18,8 @@ use llguidance::api::TopLevelGrammar;
 use llguidance::toktrie::{TokEnv, TokRxInfo, TokTrie, TokenId, TokenizerEnv};
 use llguidance::{Matcher, ParserFactory};
 
+use crate::pressure::{StepPressure, blocked_mass, field};
+
 /// Configuration B: the 7 commands in the exact byte form of the system
 /// message, with no knowledge of the state. An ID is the prefix of its
 /// field and 1 to 3 digits. An amount is 1 to 9,999,999, as in the brief.
@@ -138,6 +140,7 @@ impl Grammars {
             mask_time: Duration::ZERO,
             mask_calls: 0,
             error: None,
+            pressure: None,
         })
     }
 }
@@ -149,6 +152,15 @@ pub struct GrammarMask {
     mask_time: Duration,
     mask_calls: usize,
     error: Option<String>,
+    pressure: Option<Recorder>,
+}
+
+/// The record of the mask pressure ([`crate::pressure`]) of one generation.
+struct Recorder {
+    temperature: f64,
+    /// The bytes of the generation so far, to find the field.
+    text: Vec<u8>,
+    steps: Vec<StepPressure>,
 }
 
 impl GrammarMask {
@@ -164,6 +176,22 @@ impl GrammarMask {
             return 0.0;
         }
         self.mask_time.as_secs_f64() * 1e3 / self.mask_calls as f64
+    }
+
+    /// Record the mask pressure of each token, with the softmax at
+    /// `temperature`. The record does not change the mask, and its time is
+    /// not in [`GrammarMask::mask_ms_per_token`].
+    pub fn record_pressure(&mut self, temperature: f64) {
+        self.pressure = Some(Recorder {
+            temperature,
+            text: Vec::new(),
+            steps: Vec::new(),
+        });
+    }
+
+    /// The mask pressure of each token, in order. Empty with no record.
+    pub fn pressure(&self) -> &[StepPressure] {
+        self.pressure.as_ref().map_or(&[], |r| r.steps.as_slice())
     }
 
     /// The first error of the grammar engine in this generation. After an
@@ -186,6 +214,18 @@ impl LogitsHook for GrammarMask {
                 )
             }
         };
+        let mask_time = start.elapsed();
+        if let Some(recorder) = self.pressure.as_mut() {
+            let (blocked, top_blocked) = blocked_mass(logits, recorder.temperature, |id| {
+                !mask.is_allowed(id as TokenId)
+            });
+            recorder.steps.push(StepPressure {
+                field: field(&recorder.text),
+                blocked,
+                top_blocked,
+            });
+        }
+        let start = Instant::now();
         // `SimpleVob::apply_to` sets the permitted logits to 0, so it is
         // not a mask. Set each token that is not permitted to -inf.
         mask.iter_unset_entries(|id| {
@@ -193,11 +233,16 @@ impl LogitsHook for GrammarMask {
                 *logit = f32::NEG_INFINITY;
             }
         });
-        self.mask_time += start.elapsed();
+        self.mask_time += mask_time + start.elapsed();
         self.mask_calls += 1;
     }
 
     fn on_token(&mut self, _step: usize, token: u32) {
+        if let Some(recorder) = self.pressure.as_mut()
+            && let Ok(env) = self.matcher.tok_env()
+        {
+            recorder.text.extend(env.tok_trie().decode(&[token]));
+        }
         if self.error.is_some() {
             return;
         }
@@ -331,6 +376,51 @@ mod tests {
             names.len()
         );
         assert!(mask_times_are_kept(&grammars));
+    }
+
+    /// The record of the mask pressure (E1) does not change the mask, and
+    /// it gives one step for each token, with the field of the token.
+    #[test]
+    fn the_pressure_record_does_not_change_the_mask() {
+        use crate::pressure::Field;
+        let vocab = vocab();
+        let len = vocab.len() + 4;
+        let grammars = grammars(&vocab);
+        let mut rng = Rng::new(5);
+        let mut fields = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let mut plain = grammars.mask(GRAMMAR_B).expect("the grammar compiles");
+            let mut recorded = grammars.mask(GRAMMAR_B).expect("the grammar compiles");
+            recorded.record_pressure(0.7);
+            let mut steps = 0;
+            for step in 0..400 {
+                let logits: Vec<f32> = (0..len)
+                    .map(|_| rng.range(0, 1000) as f32 / 100.0)
+                    .collect();
+                let (mut a, mut b) = (logits.clone(), logits);
+                plain.on_logits(step, &mut a);
+                recorded.on_logits(step, &mut b);
+                assert_eq!(a, b);
+                steps += 1;
+                let token = (0..len)
+                    .max_by(|&x, &y| a[x].total_cmp(&a[y]))
+                    .expect("logits") as u32;
+                plain.on_token(step, token);
+                recorded.on_token(step, token);
+                if token == EOS {
+                    break;
+                }
+            }
+            assert_eq!(recorded.pressure().len(), steps);
+            assert!(plain.pressure().is_empty());
+            for s in recorded.pressure() {
+                assert!((0.0..=1.0).contains(&s.blocked), "{s:?}");
+                fields.insert(s.field);
+            }
+        }
+        for field in [Field::Cmd, Field::Id, Field::Amount, Field::Other] {
+            assert!(fields.contains(&field), "no step in {field:?}");
+        }
     }
 
     fn mask_times_are_kept(grammars: &Grammars) -> bool {

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fault::{self, Fault};
 use crate::ledger::{Command, Ledger, Step};
+use crate::pressure::StepPressure;
 use crate::reject::{self, MAX_SAMPLES, Rejected};
 use crate::rng::Rng;
 use crate::tasks::{Action, Class, Task};
@@ -185,6 +186,10 @@ pub struct Timing {
     pub mask_ms_per_token: Option<f64>,
     /// The grammar compile time for the command. `None` with no grammar.
     pub compile_ms: Option<f64>,
+    /// The mask pressure of each token, if the model records it. Not in
+    /// the timings file: the bench writes it to the mass file.
+    #[serde(skip)]
+    pub pressure: Vec<StepPressure>,
 }
 
 /// One generation of the model.
@@ -199,6 +204,8 @@ pub struct Generation {
     pub mask_ms_per_token: Option<f64>,
     /// The grammar compile time. `None` with no grammar.
     pub compile_ms: Option<f64>,
+    /// The mask pressure of each token. Empty with no record.
+    pub pressure: Vec<StepPressure>,
 }
 
 /// The model of the outer loop.
@@ -381,6 +388,7 @@ pub fn run_task(
                 decode_ms: result.decode_ms,
                 mask_ms_per_token: result.mask_ms_per_token,
                 compile_ms: result.compile_ms,
+                pressure: result.pressure,
             });
             let text = result.text.trim().to_string();
             let tokens = result.generated_tokens;
@@ -681,6 +689,7 @@ mod tests {
                 decode_ms: 0.0,
                 mask_ms_per_token: None,
                 compile_ms: None,
+                pressure: Vec::new(),
             })
         }
     }

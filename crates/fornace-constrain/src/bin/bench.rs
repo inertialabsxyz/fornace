@@ -16,6 +16,7 @@ use fornace_constrain::bench::{
 use fornace_constrain::compile::{LedgerRules, Rules, lark, lark_requested};
 use fornace_constrain::grammar::{GRAMMAR_B, Grammars};
 use fornace_constrain::ledger::Ledger;
+use fornace_constrain::pressure::PressureLine;
 use fornace_constrain::runs::{commit, parse_ids, today, writer};
 use fornace_constrain::tasks::Task;
 use fornace_constrain::workaround::{Workaround, params_all_ids};
@@ -57,6 +58,10 @@ struct Args {
     /// A workaround of C (brief, step 4). The file name gets `-w<number>`.
     #[arg(long, value_enum)]
     workaround: Option<Workaround>,
+    /// E1: record the mask pressure of C to `...-mass.jsonl`. The outcomes
+    /// do not change. Give a `--tag` also.
+    #[arg(long)]
+    mask_pressure: bool,
 }
 
 struct EngineModel {
@@ -65,6 +70,7 @@ struct EngineModel {
     /// The parser factory. `None` for A.
     grammars: Option<Grammars>,
     workaround: Option<Workaround>,
+    mask_pressure: bool,
 }
 
 impl Model for EngineModel {
@@ -105,15 +111,19 @@ impl Model for EngineModel {
                 }
             }),
         };
-        let (report, mask_ms_per_token, compile_ms) = match (&self.grammars, grammar) {
+        let (report, mask_ms_per_token, compile_ms, pressure) = match (&self.grammars, grammar) {
             (None, _) | (_, None) => (
                 self.engine
                     .generate_stream(prompt, &options, &mut on_token)?,
                 None,
                 None,
+                Vec::new(),
             ),
             (Some(grammars), Some(grammar)) => {
                 let mut mask = grammars.mask(&grammar)?;
+                if self.mask_pressure {
+                    mask.record_pressure(TEMPERATURE);
+                }
                 let report = self.engine.generate_stream_with_hook(
                     prompt,
                     &options,
@@ -127,6 +137,7 @@ impl Model for EngineModel {
                     report,
                     Some(mask.mask_ms_per_token()),
                     Some(mask.compile_ms()),
+                    mask.pressure().to_vec(),
                 )
             }
         };
@@ -139,6 +150,7 @@ impl Model for EngineModel {
             decode_ms: report.decode_ms_per_step * decode_steps,
             mask_ms_per_token,
             compile_ms,
+            pressure,
         })
     }
 }
@@ -163,6 +175,9 @@ fn main() -> Result<()> {
     if args.workaround.is_some() && args.config != Config::C {
         bail!("--workaround is a change to --config c");
     }
+    if args.mask_pressure && args.config != Config::C {
+        bail!("--mask-pressure is for --config c");
+    }
     let mut config_name = format!("{:?}", args.config).to_lowercase();
     if let Some(w) = args.workaround {
         config_name.push_str(&format!("-w{}", w.number()));
@@ -175,6 +190,11 @@ fn main() -> Result<()> {
     fs::create_dir_all(&args.out_dir)?;
     let mut outcomes = writer(&args.out_dir, &format!("{stem}-outcomes.jsonl"))?;
     let mut timings = writer(&args.out_dir, &format!("{stem}-timings.jsonl"))?;
+    let mut mass = if args.mask_pressure {
+        Some(writer(&args.out_dir, &format!("{stem}-mass.jsonl"))?)
+    } else {
+        None
+    };
 
     let config = LoadConfig {
         model_dir: args.model.clone(),
@@ -202,6 +222,7 @@ fn main() -> Result<()> {
         config: args.config,
         grammars,
         workaround: args.workaround,
+        mask_pressure: args.mask_pressure,
     };
     let (mut runs, mut successes) = (0, 0);
     // The refused commands, and the fault test: selected, changed, stopped.
@@ -225,6 +246,17 @@ fn main() -> Result<()> {
             writeln!(outcomes, "{}", serde_json::to_string(&outcome)?)?;
             for timing in &task_timings {
                 writeln!(timings, "{}", serde_json::to_string(timing)?)?;
+            }
+            if let Some(mass) = mass.as_mut() {
+                for timing in &task_timings {
+                    let line = PressureLine {
+                        task: timing.task,
+                        seed: timing.seed,
+                        generation: timing.generation,
+                        steps: timing.pressure.clone(),
+                    };
+                    writeln!(mass, "{}", serde_json::to_string(&line)?)?;
+                }
             }
             runs += 1;
             successes += usize::from(outcome.score.success);
@@ -253,6 +285,9 @@ fn main() -> Result<()> {
     }
     outcomes.flush()?;
     timings.flush()?;
+    if let Some(mass) = mass.as_mut() {
+        mass.flush()?;
+    }
     println!("{stem}: task success {successes} of {runs}, refused commands {refused}");
     if let Some(w) = args.workaround {
         println!(
