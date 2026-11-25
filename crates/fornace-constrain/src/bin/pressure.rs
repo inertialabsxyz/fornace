@@ -35,6 +35,13 @@ struct Args {
     outcomes: PathBuf,
     #[arg(long, default_value = "data/constrained/tasks.jsonl")]
     tasks: PathBuf,
+    /// Step 1d: the outcomes file of a stop run (`bench --pressure-stop`).
+    /// The tool compares each of its runs with the replay of the record
+    /// run at `--threshold`, and prints only that check.
+    #[arg(long, requires = "threshold")]
+    stop_run: Option<PathBuf>,
+    #[arg(long)]
+    threshold: Option<f32>,
 }
 
 /// The counts of one threshold, for a set of runs.
@@ -104,6 +111,10 @@ fn main() -> Result<()> {
         "The signal of a generation is its largest blocked mass in an ID or an amount field. \
          The stop results come from a replay of the record run.\n"
     );
+
+    if let (Some(path), Some(t)) = (&args.stop_run, args.threshold) {
+        return check_stop_run(&tasks, &outcomes, &signals, path, t);
+    }
 
     distribution(&outcomes, &signals);
 
@@ -207,6 +218,69 @@ fn main() -> Result<()> {
             );
         }
         println!();
+    }
+    Ok(())
+}
+
+/// Compares a stop run with the replay of the record run. The output that
+/// the bench changed has the partial text of the model in the stop run and
+/// the full text in the record run, so the check does not compare its text
+/// and tokens.
+fn check_stop_run(
+    tasks: &[Task],
+    record: &[Outcome],
+    signals: &HashMap<(usize, u64), Vec<f32>>,
+    path: &std::path::Path,
+    threshold: f32,
+) -> Result<()> {
+    let stop: Vec<Outcome> = fs::read_to_string(path)
+        .with_context(|| format!("read {path:?}"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let by_run: HashMap<(usize, u64), &Outcome> =
+        record.iter().map(|o| ((o.task, o.seed), o)).collect();
+    let (mut same, mut stopped) = (0, 0);
+    let mut different = Vec::new();
+    for o in &stop {
+        let r = by_run
+            .get(&(o.task, o.seed))
+            .with_context(|| format!("task {} seed {} is not in the record run", o.task, o.seed))?;
+        let task = tasks.get(o.task).context("a task of the outcomes")?;
+        let (mut expected, end) = replay(
+            &task.start,
+            &r.outputs,
+            &signals[&(o.task, o.seed)],
+            threshold,
+        );
+        let expected_score = score(task, &end, &expected);
+        let mut actual = o.outputs.clone();
+        for out in expected.iter_mut().chain(actual.iter_mut()) {
+            if out.changed_by.is_some() {
+                out.text.clear();
+                out.tokens = 0;
+            }
+        }
+        stopped += usize::from(o.outputs.iter().any(|out| out.changed_by.is_some()));
+        if actual == expected && o.score == expected_score {
+            same += 1;
+        } else {
+            different.push(format!("task {} seed {}", o.task, o.seed));
+        }
+    }
+    println!("## Check of the stop run at {threshold}\n");
+    println!(
+        "Stop run: `{}`.\n",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+    );
+    println!("- Runs: {}", stop.len());
+    println!("- Runs with a stop: {stopped}");
+    println!("- Runs the same as the replay (outputs and score): {same}");
+    println!("- Runs not the same: {}", different.len());
+    for d in different.iter().take(20) {
+        println!("  - {d}");
     }
     Ok(())
 }

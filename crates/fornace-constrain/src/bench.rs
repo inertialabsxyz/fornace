@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fault::{self, Fault};
 use crate::ledger::{Command, Ledger, Step};
-use crate::pressure::StepPressure;
+use crate::pressure::{self, StepPressure};
 use crate::reject::{self, MAX_SAMPLES, Rejected};
 use crate::rng::Rng;
 use crate::tasks::{Action, Class, Task};
@@ -206,6 +206,8 @@ pub struct Generation {
     pub compile_ms: Option<f64>,
     /// The mask pressure of each token. Empty with no record.
     pub pressure: Vec<StepPressure>,
+    /// E1: the mask pressure stopped the generation.
+    pub stopped: bool,
 }
 
 /// The model of the outer loop.
@@ -353,6 +355,8 @@ pub fn run_task(
         // The kept sample: the text, the tokens, the fault, and the command
         // that the check of D permits.
         let mut kept = None;
+        // E1: the mask pressure stopped the generation.
+        let mut pressure_stop = false;
         for sample in 0..samples {
             let sample_seed = reject::sample_seed(generation_seed, sample);
             let selected = faults && fault::selected(sample_seed);
@@ -390,9 +394,17 @@ pub fn run_task(
                 compile_ms: result.compile_ms,
                 pressure: result.pressure,
             });
+            let stopped = result.stopped;
             let text = result.text.trim().to_string();
             let tokens = result.generated_tokens;
-            if config == Config::D {
+            if stopped {
+                // The bench sends `ASK_OPERATOR` in place of the command.
+                pressure_stop = true;
+                let ask = pressure::stop_output(String::new(), 0)
+                    .command
+                    .expect("the stop output has a command");
+                kept = Some((text, tokens, fault, Some(ask)));
+            } else if config == Config::D {
                 match reject::check(&state, &text) {
                     Ok(command) => {
                         kept = Some((text, tokens, fault, Some(command)));
@@ -414,7 +426,7 @@ pub fn run_task(
             let text = serde_json::to_string(&command).expect("a command serializes");
             (text, 0, None, Some(command))
         });
-        let mut changed_by = None;
+        let mut changed_by = pressure_stop.then(|| pressure::CHANGED_BY.to_string());
         let parsed = match (checked, workaround) {
             (Some(command), _) => Ok(command),
             (None, Some(Workaround::Requested)) => {
@@ -690,6 +702,7 @@ mod tests {
                 mask_ms_per_token: None,
                 compile_ms: None,
                 pressure: Vec::new(),
+                stopped: false,
             })
         }
     }

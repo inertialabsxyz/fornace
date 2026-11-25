@@ -161,6 +161,11 @@ struct Recorder {
     /// The bytes of the generation so far, to find the field.
     text: Vec<u8>,
     steps: Vec<StepPressure>,
+    /// E1 stop: the threshold of the blocked mass in a value field.
+    stop_above: Option<f32>,
+    /// The mask pressure went above `stop_above`. From that token, the mask
+    /// permits only EOS.
+    stopped: bool,
 }
 
 impl GrammarMask {
@@ -186,7 +191,25 @@ impl GrammarMask {
             temperature,
             text: Vec::new(),
             steps: Vec::new(),
+            stop_above: None,
+            stopped: false,
         });
+    }
+
+    /// Record the mask pressure as [`GrammarMask::record_pressure`] does,
+    /// and stop the generation at the first token in an ID or amount field
+    /// with a blocked mass above `threshold`. At that token and after it,
+    /// the mask permits only EOS.
+    pub fn stop_on_pressure(&mut self, temperature: f64, threshold: f32) {
+        self.record_pressure(temperature);
+        if let Some(recorder) = self.pressure.as_mut() {
+            recorder.stop_above = Some(threshold);
+        }
+    }
+
+    /// The mask pressure stopped the generation.
+    pub fn stopped(&self) -> bool {
+        self.pressure.as_ref().is_some_and(|r| r.stopped)
     }
 
     /// The mask pressure of each token, in order. Empty with no record.
@@ -215,15 +238,27 @@ impl LogitsHook for GrammarMask {
             }
         };
         let mask_time = start.elapsed();
+        let mut mask = mask;
         if let Some(recorder) = self.pressure.as_mut() {
             let (blocked, top_blocked) = blocked_mass(logits, recorder.temperature, |id| {
                 !mask.is_allowed(id as TokenId)
             });
-            recorder.steps.push(StepPressure {
+            let step = StepPressure {
                 field: field(&recorder.text),
                 blocked,
                 top_blocked,
-            });
+            };
+            recorder.steps.push(step);
+            if recorder.stopped
+                || recorder
+                    .stop_above
+                    .is_some_and(|t| step.field.is_value() && blocked > t)
+            {
+                recorder.stopped = true;
+                if let Ok(env) = self.matcher.tok_env() {
+                    mask = env.tok_trie().eos_token_set();
+                }
+            }
         }
         let start = Instant::now();
         // `SimpleVob::apply_to` sets the permitted logits to 0, so it is
@@ -238,6 +273,11 @@ impl LogitsHook for GrammarMask {
     }
 
     fn on_token(&mut self, _step: usize, token: u32) {
+        // After the stop, the token is EOS, which the grammar can refuse at
+        // this point. The parser does not get it.
+        if self.stopped() {
+            return;
+        }
         if let Some(recorder) = self.pressure.as_mut()
             && let Ok(env) = self.matcher.tok_env()
         {
@@ -421,6 +461,48 @@ mod tests {
         for field in [Field::Cmd, Field::Id, Field::Amount, Field::Other] {
             assert!(fields.contains(&field), "no step in {field:?}");
         }
+    }
+
+    /// The E1 stop: a high blocked mass in a value field makes the mask
+    /// permit only EOS. A high mass in a fixed part of the grammar does not
+    /// stop the generation.
+    #[test]
+    fn a_high_pressure_in_a_value_field_permits_only_eos() {
+        let vocab = vocab();
+        let len = vocab.len() + 4;
+        let grammars = grammars(&vocab);
+        let byte = |b: u8| vocab.iter().position(|t| t == &[b]).expect("a byte token");
+        let mut mask = grammars.mask(GRAMMAR_B).expect("the grammar compiles");
+        mask.stop_on_pressure(0.7, 0.5);
+        let prefix = b"{\"cmd\":\"CAPTURE\",\"payment\":\"p_1\",\"amount\":";
+        for (step, &b) in prefix.iter().enumerate() {
+            // Most of the mass on `x`, which the grammar blocks, but not in
+            // a value field until the amount.
+            let mut logits = vec![0.0f32; len];
+            logits[byte(b'x')] = 20.0;
+            logits[byte(b)] = 10.0;
+            mask.on_logits(step, &mut logits);
+            let in_value = mask.pressure().last().expect("a step").field.is_value();
+            if in_value {
+                assert!(mask.stopped(), "no stop at step {step}");
+                break;
+            }
+            assert!(
+                !mask.stopped(),
+                "a stop at step {step}, out of a value field"
+            );
+            assert!(logits[byte(b)].is_finite());
+            mask.on_token(step, byte(b) as u32);
+        }
+        // The stop is in the payment ID, after `"payment":`.
+        assert!(mask.stopped());
+        let mut logits = vec![0.0f32; len];
+        logits[byte(b'x')] = 20.0;
+        mask.on_logits(99, &mut logits);
+        let finite: Vec<usize> = (0..len).filter(|&i| logits[i].is_finite()).collect();
+        assert_eq!(finite, vec![EOS as usize]);
+        mask.on_token(99, EOS);
+        assert_eq!(mask.error(), None);
     }
 
     fn mask_times_are_kept(grammars: &Grammars) -> bool {

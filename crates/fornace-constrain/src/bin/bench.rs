@@ -62,6 +62,11 @@ struct Args {
     /// do not change. Give a `--tag` also.
     #[arg(long)]
     mask_pressure: bool,
+    /// E1: stop the generation of C at a blocked mass above this value in an
+    /// ID or amount field, and send `ASK_OPERATOR`. The file name gets
+    /// `-p<value>`.
+    #[arg(long)]
+    pressure_stop: Option<f32>,
 }
 
 struct EngineModel {
@@ -71,6 +76,7 @@ struct EngineModel {
     grammars: Option<Grammars>,
     workaround: Option<Workaround>,
     mask_pressure: bool,
+    pressure_stop: Option<f32>,
 }
 
 impl Model for EngineModel {
@@ -111,36 +117,41 @@ impl Model for EngineModel {
                 }
             }),
         };
-        let (report, mask_ms_per_token, compile_ms, pressure) = match (&self.grammars, grammar) {
-            (None, _) | (_, None) => (
-                self.engine
-                    .generate_stream(prompt, &options, &mut on_token)?,
-                None,
-                None,
-                Vec::new(),
-            ),
-            (Some(grammars), Some(grammar)) => {
-                let mut mask = grammars.mask(&grammar)?;
-                if self.mask_pressure {
-                    mask.record_pressure(TEMPERATURE);
+        let (report, mask_ms_per_token, compile_ms, pressure, stopped) =
+            match (&self.grammars, grammar) {
+                (None, _) | (_, None) => (
+                    self.engine
+                        .generate_stream(prompt, &options, &mut on_token)?,
+                    None,
+                    None,
+                    Vec::new(),
+                    false,
+                ),
+                (Some(grammars), Some(grammar)) => {
+                    let mut mask = grammars.mask(&grammar)?;
+                    if let Some(threshold) = self.pressure_stop {
+                        mask.stop_on_pressure(TEMPERATURE, threshold);
+                    } else if self.mask_pressure {
+                        mask.record_pressure(TEMPERATURE);
+                    }
+                    let report = self.engine.generate_stream_with_hook(
+                        prompt,
+                        &options,
+                        &mut mask,
+                        &mut on_token,
+                    )?;
+                    if let Some(error) = mask.error() {
+                        bail!("the grammar engine failed: {error}");
+                    }
+                    (
+                        report,
+                        Some(mask.mask_ms_per_token()),
+                        Some(mask.compile_ms()),
+                        mask.pressure().to_vec(),
+                        mask.stopped(),
+                    )
                 }
-                let report = self.engine.generate_stream_with_hook(
-                    prompt,
-                    &options,
-                    &mut mask,
-                    &mut on_token,
-                )?;
-                if let Some(error) = mask.error() {
-                    bail!("the grammar engine failed: {error}");
-                }
-                (
-                    report,
-                    Some(mask.mask_ms_per_token()),
-                    Some(mask.compile_ms()),
-                    mask.pressure().to_vec(),
-                )
-            }
-        };
+            };
         let decode_steps = report.generated_tokens.saturating_sub(1) as f64;
         Ok(Generation {
             text: report.texts[0].clone(),
@@ -151,6 +162,7 @@ impl Model for EngineModel {
             mask_ms_per_token,
             compile_ms,
             pressure,
+            stopped,
         })
     }
 }
@@ -178,9 +190,20 @@ fn main() -> Result<()> {
     if args.mask_pressure && args.config != Config::C {
         bail!("--mask-pressure is for --config c");
     }
+    if let Some(t) = args.pressure_stop {
+        if args.config != Config::C || args.workaround.is_some() {
+            bail!("--pressure-stop is for --config c with no workaround");
+        }
+        if !(0.0..1.0).contains(&t) {
+            bail!("--pressure-stop must be at least 0 and below 1, not {t}");
+        }
+    }
     let mut config_name = format!("{:?}", args.config).to_lowercase();
     if let Some(w) = args.workaround {
         config_name.push_str(&format!("-w{}", w.number()));
+    }
+    if let Some(t) = args.pressure_stop {
+        config_name.push_str(&format!("-p{t}"));
     }
     let mut stem = format!("{}-{}-{config_name}-{model_name}", today(), commit());
     if let Some(tag) = &args.tag {
@@ -223,6 +246,7 @@ fn main() -> Result<()> {
         grammars,
         workaround: args.workaround,
         mask_pressure: args.mask_pressure,
+        pressure_stop: args.pressure_stop,
     };
     let (mut runs, mut successes) = (0, 0);
     // The refused commands, and the fault test: selected, changed, stopped.
@@ -289,6 +313,9 @@ fn main() -> Result<()> {
         mass.flush()?;
     }
     println!("{stem}: task success {successes} of {runs}, refused commands {refused}");
+    if let Some(t) = args.pressure_stop {
+        println!("mask pressure stop at {t}: {changed_to_ask} outputs changed to ASK_OPERATOR");
+    }
     if let Some(w) = args.workaround {
         println!(
             "workaround {}: {changed_to_ask} outputs changed to ASK_OPERATOR",
