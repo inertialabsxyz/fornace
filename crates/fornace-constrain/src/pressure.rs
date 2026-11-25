@@ -5,6 +5,16 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::bench::{Answer, Output};
+use crate::ledger::{Command, Ledger};
+
+/// The question of the `ASK_OPERATOR` that the bench sends when the mask
+/// pressure is above the threshold.
+pub const PRESSURE_QUESTION: &str = "The ledger state does not permit the command that I started to write. What do you want me to do?";
+
+/// The value of [`Output::changed_by`] for a stop on the mask pressure.
+pub const CHANGED_BY: &str = "mask pressure above the threshold";
+
 /// The field of the command that a token starts or continues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +66,59 @@ impl PressureLine {
             .map(|s| s.blocked)
             .fold(0.0, f32::max)
     }
+}
+
+/// The output that the bench sends in place of a generation with a mask
+/// pressure above the threshold. `text` is the text of the model.
+pub fn stop_output(text: String, tokens: usize) -> Output {
+    Output {
+        text,
+        command: Some(Command::AskOperator {
+            question: PRESSURE_QUESTION.to_string(),
+        }),
+        answer: Answer::End,
+        tokens,
+        fault: None,
+        samples: None,
+        rejected: Vec::new(),
+        fallback: false,
+        changed_by: Some(CHANGED_BY.to_string()),
+    }
+}
+
+/// The first generation with a signal above `threshold`. `signals` has the
+/// largest value mass of each generation, in order.
+pub fn first_stop(signals: &[f32], threshold: f32) -> Option<usize> {
+    signals.iter().position(|&s| s > threshold)
+}
+
+/// A run of C with the stop at `threshold`, from the record run. Up to the
+/// stop, the stop run has the same prompts, seeds, and states as the record
+/// run, so its outputs are the same. The result has the outputs and the end
+/// state.
+pub fn replay(
+    start: &Ledger,
+    outputs: &[Output],
+    signals: &[f32],
+    threshold: f32,
+) -> (Vec<Output>, Ledger) {
+    let mut state = start.clone();
+    let stop = first_stop(signals, threshold);
+    let kept = stop.unwrap_or(outputs.len()).min(outputs.len());
+    let mut result: Vec<Output> = outputs[..kept].to_vec();
+    for output in &result {
+        if let Some(command) = &output.command {
+            // The refused commands do not change the state.
+            let _ = state.execute(command);
+        }
+    }
+    if let Some(stop) = stop.filter(|&s| s < outputs.len()) {
+        result.push(stop_output(
+            outputs[stop].text.clone(),
+            outputs[stop].tokens,
+        ));
+    }
+    (result, state)
 }
 
 /// The field of the next token, from the bytes of the command before it.
@@ -175,6 +238,52 @@ mod tests {
         assert!(top);
         assert_eq!(blocked_mass(&[1.0, 3.0], 1.0, |_| false).0, 0.0);
         assert_eq!(blocked_mass(&[1.0, 3.0], 0.0, |id| id == 1), (1.0, true));
+    }
+
+    #[test]
+    fn the_replay_stops_at_the_first_signal_above_the_threshold() {
+        let task = crate::tasks::generate_task(1, 0);
+        let state = &task.start;
+        let id = state.payments.keys().next().expect("a payment");
+        let void = Command::Void {
+            payment: id.clone(),
+        };
+        let mut after = state.clone();
+        let step = after.execute(&void);
+        let output = |command: Command, answer: Answer| Output {
+            text: serde_json::to_string(&command).expect("serializes"),
+            command: Some(command),
+            answer,
+            tokens: 5,
+            fault: None,
+            samples: None,
+            rejected: Vec::new(),
+            fallback: false,
+            changed_by: None,
+        };
+        let answer = match step {
+            Ok(_) => Answer::Ok,
+            Err(refusal) => Answer::Refused(refusal.to_string()),
+        };
+        let outputs = vec![output(void, answer), output(Command::Done, Answer::End)];
+        // No stop: the same outputs, and the state after the commands.
+        let (same, end) = replay(state, &outputs, &[0.1, 0.2], 0.5);
+        assert_eq!(same, outputs);
+        assert_eq!(end, after);
+        // A stop at the second generation: the first command stays.
+        let (stopped, end) = replay(state, &outputs, &[0.1, 0.9], 0.5);
+        assert_eq!(stopped.len(), 2);
+        assert_eq!(stopped[0], outputs[0]);
+        assert_eq!(stopped[1].changed_by.as_deref(), Some(CHANGED_BY));
+        assert!(matches!(
+            stopped[1].command,
+            Some(Command::AskOperator { .. })
+        ));
+        assert_eq!(end, after);
+        // A stop at the first generation: the state does not change.
+        let (stopped, end) = replay(state, &outputs, &[0.6, 0.0], 0.5);
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(&end, state);
     }
 
     #[test]
