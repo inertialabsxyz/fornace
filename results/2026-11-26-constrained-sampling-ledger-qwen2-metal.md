@@ -2,19 +2,20 @@
 
 ## Why it matters
 
-A small local model that sends commands to a real system must not send a
-command that the system will refuse. A grammar fixes the form of the
-output, but not the state: it permits a refund of a payment that is
-voided. This work puts the live state into the sampler. Before each
-command, the engine reads the state of a payments ledger and builds a
-grammar that permits only the commands, the IDs, and the amounts that the
-state permits. The model then cannot write a command that the ledger
-refuses. The question is what this guarantee costs in quality. A hard mask
-can change a request that the ledger cannot do into a valid command that
-is wrong, and nothing reports it. This result measures that cost. Then
-it tests two changes that make the error visible: a stop on the
-probability that the mask blocks, and a check of the request against the
-state before the model runs.
+An agent that sends commands to a payment system must not send a command
+that the system refuses. A grammar fixes the form of the output, but not
+the state: it still permits a refund of a voided payment. So this work
+puts the live state into the sampler. Before each command, the engine
+reads the ledger and permits only the commands, IDs, and amounts that the
+ledger accepts. The model then cannot write a command that the ledger
+refuses.
+
+That guarantee has a cost. When a request is impossible, a hard mask can
+turn it into a valid command that is wrong, and nothing reports it. This
+result measures how often that happens. Then it tests two changes that
+make the error visible: a stop when the mask blocks most of the
+probability, and a check of the request against the ledger before the
+model runs.
 
 ## What was measured and how
 
@@ -248,22 +249,20 @@ The check refused 125 requests and ended 375 of 900 runs
 ## What it means if you run models on your own hardware
 
 A grammar mask that knows the state of your system can guarantee that a
-small local model sends only commands that the system will accept. On
-this ledger it does that for 3,559 of 3,559 commands, and the mask
-costs less than 1 % of a decode step. But valid is not correct. When
-the operator asks for something that the system cannot do, a 1.5B model
-almost never says so. With a hard mask, its wrong command then goes
-through as a different valid command: a smaller refund, or a refund of
-another payment.
+small local model sends only commands that the system accepts. On this
+ledger: 3,559 of 3,559 commands, for less than 1 % of a decode step. But
+valid is not correct. Ask a 1.5B model for something that the system
+cannot do, and it almost never says so. With a hard mask, the wrong
+command goes through as a different valid one: a smaller refund, or a
+refund of another payment.
 
 So do not let the mask be the only check. Check the request against the
-state before the model runs, with plain code, and ask a person when the
-state refuses it. On this model, that check raised the success on
-impossible requests from 11 % to 90 % and did not change the success on
-the usual requests. Keep the mask for the requests that the code cannot
-read, and keep the check before execution. If you cannot read the
-requests, a stop on the blocked probability of the mask is the next best
-signal, but it costs many false alarms.
+state with plain code before the model runs, and ask a person when the
+state says no. Here, that raised the correct answers on impossible
+requests from 11 % to 90 %, with no change on the usual requests. Keep the
+mask for the requests that the code cannot read. Keep the check before
+execution too. If you cannot read the requests, the next best signal is a
+stop on the blocked probability of the mask. It costs many false alarms.
 
 ## Conclusion
 
