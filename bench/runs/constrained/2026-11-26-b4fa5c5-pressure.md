@@ -1,0 +1,79 @@
+# E1: mask pressure of C
+
+Made by `pressure` from `2026-11-25-42d231b-c-qwen2.5-1.5b-instruct-mass-outcomes.jsonl` and `2026-11-25-42d231b-c-qwen2.5-1.5b-instruct-mass-mass.jsonl`.
+
+The signal of a generation is its largest blocked mass in an ID or an amount field. The stop results come from a replay of the record run.
+
+## Distribution of the signal
+
+| Task group | Generations | Median | 90th percentile | First generations | Median | Above 0.5 | Above 0.9 | Runs with a generation above 0.5 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| usual | 2041 | 0.004 | 0.995 | 540 | 0.007 | 106 | 45 | 214/540 |
+| over-limit | 618 | 0.006 | 1.000 | 180 | 0.033 | 72 | 70 | 107/180 |
+| wrong-status, prefix ID | 472 | 0.995 | 1.000 | 90 | 1.000 | 77 | 76 | 87/90 |
+| wrong-status, no prefix ID | 428 | 0.545 | 1.000 | 90 | 0.998 | 67 | 66 | 81/90 |
+
+## The thresholds of the rule (seed 1)
+
+Selected 0.99, low 0.9, high 0.99.
+
+## False alarms from the bench at 0.99, by the result in C (all seeds)
+
+| Result of the same run in C | Runs |
+| --- | --- |
+| Success | 11 |
+| False alarm of the model, later in the run | 7 |
+| Other failure | 125 |
+| All | 143 |
+
+## Seed 1 (the threshold comes from these runs)
+
+| Threshold | Runs | Usual success | False alarms | From the bench | Trap success | From the bench | Shortened values | Wrong IDs | Unit errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| none (C) | 300 | 61/180 | 44 | 0 | 10/120 | 0 | 23 | 51 | 76 |
+| 0.1 | 300 | 43/180 | 123 | 83 | 87/120 | 77 | 4 | 2 | 26 |
+| 0.2 | 300 | 43/180 | 120 | 79 | 85/120 | 75 | 4 | 2 | 26 |
+| 0.3 | 300 | 44/180 | 115 | 74 | 85/120 | 75 | 4 | 2 | 28 |
+| 0.4 | 300 | 46/180 | 112 | 71 | 84/120 | 74 | 4 | 2 | 28 |
+| 0.5 | 300 | 46/180 | 109 | 68 | 84/120 | 74 | 4 | 2 | 28 |
+| 0.6 | 300 | 50/180 | 104 | 63 | 84/120 | 74 | 4 | 2 | 28 |
+| 0.7 | 300 | 52/180 | 102 | 61 | 84/120 | 74 | 4 | 2 | 28 |
+| 0.8 | 300 | 53/180 | 98 | 57 | 84/120 | 74 | 4 | 2 | 28 |
+| 0.9 (low) | 300 | 57/180 | 91 | 50 | 83/120 | 73 | 4 | 3 | 31 |
+| 0.95 | 300 | 58/180 | 89 | 48 | 81/120 | 71 | 4 | 4 | 31 |
+| 0.99 (selected) | 300 | 58/180 | 85 | 43 | 77/120 | 67 | 5 | 7 | 37 |
+
+## Seeds 2 and 3 (not used for the threshold)
+
+| Threshold | Runs | Usual success | False alarms | From the bench | Trap success | From the bench | Shortened values | Wrong IDs | Unit errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| none (C) | 600 | 110/360 | 94 | 0 | 31/240 | 0 | 42 | 100 | 147 |
+| 0.1 | 600 | 71/360 | 263 | 179 | 177/240 | 146 | 8 | 4 | 52 |
+| 0.2 | 600 | 75/360 | 252 | 168 | 175/240 | 144 | 8 | 4 | 52 |
+| 0.3 | 600 | 79/360 | 244 | 158 | 173/240 | 142 | 8 | 4 | 52 |
+| 0.4 | 600 | 81/360 | 237 | 151 | 173/240 | 142 | 8 | 4 | 53 |
+| 0.5 | 600 | 82/360 | 232 | 146 | 173/240 | 142 | 8 | 4 | 54 |
+| 0.6 | 600 | 86/360 | 227 | 141 | 173/240 | 142 | 8 | 4 | 54 |
+| 0.7 | 600 | 88/360 | 224 | 138 | 173/240 | 142 | 8 | 4 | 56 |
+| 0.8 | 600 | 91/360 | 219 | 132 | 173/240 | 142 | 8 | 4 | 59 |
+| 0.9 (low) | 600 | 96/360 | 209 | 121 | 170/240 | 139 | 9 | 5 | 62 |
+| 0.95 | 600 | 101/360 | 199 | 110 | 168/240 | 137 | 9 | 7 | 64 |
+| 0.99 (selected) | 600 | 102/360 | 189 | 100 | 160/240 | 129 | 10 | 11 | 64 |
+
+## All seeds
+
+| Threshold | Runs | Usual success | False alarms | From the bench | Trap success | From the bench | Shortened values | Wrong IDs | Unit errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| none (C) | 900 | 171/540 | 138 | 0 | 41/360 | 0 | 65 | 151 | 223 |
+| 0.1 | 900 | 114/540 | 386 | 262 | 264/360 | 223 | 12 | 6 | 78 |
+| 0.2 | 900 | 118/540 | 372 | 247 | 260/360 | 219 | 12 | 6 | 78 |
+| 0.3 | 900 | 123/540 | 359 | 232 | 258/360 | 217 | 12 | 6 | 80 |
+| 0.4 | 900 | 127/540 | 349 | 222 | 257/360 | 216 | 12 | 6 | 81 |
+| 0.5 | 900 | 128/540 | 341 | 214 | 257/360 | 216 | 12 | 6 | 82 |
+| 0.6 | 900 | 136/540 | 331 | 204 | 257/360 | 216 | 12 | 6 | 82 |
+| 0.7 | 900 | 140/540 | 326 | 199 | 257/360 | 216 | 12 | 6 | 84 |
+| 0.8 | 900 | 144/540 | 317 | 189 | 257/360 | 216 | 12 | 6 | 87 |
+| 0.9 (low) | 900 | 153/540 | 300 | 171 | 253/360 | 212 | 13 | 8 | 93 |
+| 0.95 | 900 | 159/540 | 288 | 158 | 249/360 | 208 | 13 | 11 | 95 |
+| 0.99 (selected) | 900 | 160/540 | 274 | 143 | 237/360 | 196 | 15 | 18 | 101 |
+
