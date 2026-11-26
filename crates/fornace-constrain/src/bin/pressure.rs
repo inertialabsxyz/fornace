@@ -177,6 +177,34 @@ fn main() -> Result<()> {
         GRID[selected], GRID[low], GRID[high]
     );
 
+    // The usual runs that the bench stops at the selected threshold, by the
+    // result of the same run in C.
+    let t = GRID[selected];
+    let (mut c_success, mut c_alarm, mut c_other) = (0, 0, 0);
+    for o in outcomes.iter().filter(|o| o.class == Class::Usual) {
+        let task = tasks.get(o.task).context("a task of the outcomes")?;
+        let s = &signals[&(o.task, o.seed)];
+        let (outputs, end) = replay(&task.start, &o.outputs, s, t);
+        let bench = outputs.iter().any(|out| out.changed_by.is_some());
+        if !(bench && score(task, &end, &outputs).false_alarm) {
+            continue;
+        }
+        if o.score.success {
+            c_success += 1;
+        } else if o.score.false_alarm {
+            c_alarm += 1;
+        } else {
+            c_other += 1;
+        }
+    }
+    println!("## False alarms from the bench at {t}, by the result in C (all seeds)\n");
+    println!("| Result of the same run in C | Runs |");
+    println!("| --- | --- |");
+    println!("| Success | {c_success} |");
+    println!("| False alarm of the model, later in the run | {c_alarm} |");
+    println!("| Other failure | {c_other} |");
+    println!("| All | {} |\n", c_success + c_alarm + c_other);
+
     for (title, seeds) in [
         ("Seed 1 (the threshold comes from these runs)", &[1u64][..]),
         ("Seeds 2 and 3 (not used for the threshold)", &[2, 3][..]),

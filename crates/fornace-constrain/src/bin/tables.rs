@@ -336,12 +336,33 @@ fn paired_table(runs: &[Run], pairs: &[(&str, &str)]) -> String {
     text
 }
 
-fn label(outcome: &Outcome) -> String {
+/// The label of a run: the configuration and the workaround from the
+/// outcomes, and the changes of the changes brief from the file name. In
+/// `<date>-<commit>-c-p0.99-r-<model>-...`, `p0.99` is the mask pressure
+/// stop (E1) and `r` is the request check (E3).
+fn label(outcome: &Outcome, file: &str) -> String {
     let config = format!("{:?}", outcome.config);
-    match outcome.workaround {
+    let marker = format!("-{}-", config.to_lowercase());
+    let mut label = match outcome.workaround {
         Some(w) => format!("{config} + workaround {}", w.number()),
         None => config,
+    };
+    let model = format!("-{}", outcome.model);
+    // The parts between the configuration and the model, after the `-` of
+    // the configuration.
+    if let Some(start) = file.find(&marker) {
+        let rest = &file[start + marker.len() - 1..];
+        if let Some(end) = rest.find(&model) {
+            for part in rest[..end].split('-').filter(|p| !p.is_empty()) {
+                if let Some(t) = part.strip_prefix('p') {
+                    label.push_str(&format!(" + stop at {t}"));
+                } else if part == "r" {
+                    label.push_str(" + request check");
+                }
+            }
+        }
     }
+    label
 }
 
 fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
@@ -363,12 +384,13 @@ fn main() -> Result<()> {
         let first = outcomes
             .first()
             .with_context(|| format!("{path:?} is empty"))?;
+        let file = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         runs.push(Run {
-            label: label(first),
-            file: path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            label: label(first, &file),
+            file,
             timings: read_jsonl(&timings_path)?,
             outcomes,
         });
@@ -387,8 +409,9 @@ fn main() -> Result<()> {
     println!("{}", main_table(&runs));
     println!("## `ASK_OPERATOR` from the bench\n");
     println!(
-        "The fallback of D, and the change of workarounds 3 and 4. For the usual tasks, the \
-         column is 0: an `ASK_OPERATOR` there is a false alarm, not a success.\n"
+        "The fallback of D, the change of workarounds 3 and 4, the mask pressure stop, and the \
+         request check. For the usual tasks, the column is 0: an `ASK_OPERATOR` there is a false \
+         alarm, not a success.\n"
     );
     println!("{}", bench_ask_table(&runs));
     println!("## The first command of the trap tasks (brief, step 4)\n");
@@ -407,6 +430,13 @@ fn main() -> Result<()> {
                 ("C", "C + workaround 4"),
                 ("C", "C + workaround 5"),
                 ("D", "C + workaround 3"),
+                ("C", "C + stop at 0.99"),
+                ("D", "C + stop at 0.99"),
+                ("C", "C + request check"),
+                ("D", "C + request check"),
+                ("C + workaround 3", "C + request check"),
+                ("D", "D + request check"),
+                ("C + request check", "D + request check"),
             ]
         )
     );
