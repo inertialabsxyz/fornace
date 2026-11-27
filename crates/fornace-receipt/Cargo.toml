@@ -13,3 +13,4 @@ p256.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
 thiserror.workspace = true
+clap.workspace = true

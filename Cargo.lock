@@ -1117,6 +1117,7 @@ name = "fornace-receipt"
 version = "0.0.1"
 dependencies = [
  "ciborium",
+ "clap",
  "coset",
  "getrandom 0.4.3",
  "p256",

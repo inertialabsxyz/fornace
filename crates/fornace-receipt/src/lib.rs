@@ -9,15 +9,27 @@
 //! claims. It does not show where the model ran.
 
 mod cbor;
+#[cfg(target_os = "macos")]
+pub mod enclave;
 pub mod manifest;
 pub mod receipt;
 pub mod signer;
 pub mod verify;
 
+#[cfg(target_os = "macos")]
+pub use enclave::{EnclaveError, EnclaveSigner};
 pub use manifest::{Manifest, ManifestFile};
 pub use receipt::{NONCE_LEN, PROFILE, Receipt, Settings, request_hash, response_hash};
 pub use signer::{SignError, Signature, Signer, SoftwareSigner, sign};
 pub use verify::{Verified, VerifyError, verify};
+
+/// The default key file of the Secure Enclave signer:
+/// `~/Library/Application Support/fornace/receipt-key.se`. It holds an
+/// encrypted key blob, not the key. Do not put it in a repository.
+pub fn default_key_path() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    std::path::PathBuf::from(home).join("Library/Application Support/fornace/receipt-key.se")
+}
 
 /// A SHA-256 digest.
 pub type Hash = [u8; 32];
