@@ -60,6 +60,41 @@ Rules:
 - If the ledger cannot do the request as the operator wrote it, send ASK_OPERATOR. Do not change the request.
 - When the request is complete, send DONE.";
 
+/// The system message of the bench.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Prompt {
+    /// [`SYSTEM`]: the examples have values.
+    #[default]
+    V1,
+    /// [`SYSTEM_V2`]: the examples have placeholders.
+    V2,
+}
+
+/// [`SYSTEM`] with placeholders in the examples. The models copy the
+/// example values of [`SYSTEM`] and its example question.
+pub const SYSTEM_V2: &str = "You are an operations assistant for a payments ledger. \
+An operator sends a request. You send commands to the ledger, one command in each reply.
+
+Reply with one JSON object and nothing else. The commands:
+{\"cmd\":\"AUTHORIZE\",\"account\":\"<account>\",\"amount\":<amount>}
+{\"cmd\":\"CAPTURE\",\"payment\":\"<payment>\",\"amount\":<amount>}
+{\"cmd\":\"VOID\",\"payment\":\"<payment>\"}
+{\"cmd\":\"REFUND\",\"payment\":\"<payment>\",\"amount\":<amount>}
+{\"cmd\":\"TRANSFER\",\"from\":\"<account>\",\"to\":\"<account>\",\"amount\":<amount>}
+{\"cmd\":\"ASK_OPERATOR\",\"question\":\"<question>\"}
+{\"cmd\":\"DONE\"}
+
+Rules:
+- Replace each <...> with a value from the request and the state.
+- All amounts are whole numbers of cents. $1 is 100 cents.
+- AUTHORIZE makes a new payment with the next free ID. The amount is 1 to 1000000.
+- CAPTURE needs the status authorized. The amount is at most the authorized amount. The account of the payment gets the amount.
+- VOID needs the status authorized.
+- REFUND needs the status captured or partially_refunded. The amount is at most the captured amount minus the refunded amount, and at most the balance of the account of the payment.
+- TRANSFER needs two different accounts. The amount is at most the balance of from.
+- If the ledger cannot do the request as the operator wrote it, send ASK_OPERATOR. Do not change the request.
+- When the request is complete, send DONE.";
+
 /// What the ledger said about one output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", content = "reason", rename_all = "snake_case")]
@@ -321,6 +356,8 @@ pub struct RunOptions {
     /// E3: check the request against the state before the model runs
     /// ([`crate::precheck`]), for C and D.
     pub request_check: bool,
+    /// The system message. V2 is for C and D with no workaround.
+    pub prompt: Prompt,
 }
 
 /// Runs one task with one seed. The result has the outcome and a timing
@@ -340,6 +377,7 @@ pub fn run_task(
         faults,
         workaround,
         request_check,
+        prompt,
     } = *options;
     let request = task
         .request
@@ -354,7 +392,14 @@ pub fn run_task(
         workaround.is_none() || config == Config::C,
         "a workaround is a change to C"
     );
-    let system = workaround::system(workaround);
+    anyhow::ensure!(
+        prompt == Prompt::V1 || (workaround.is_none() && matches!(config, Config::C | Config::D)),
+        "the prompt v2 is for C and D with no workaround"
+    );
+    let system = match prompt {
+        Prompt::V1 => workaround::system(workaround),
+        Prompt::V2 => SYSTEM_V2.to_string(),
+    };
     let mut state = task.start.clone();
     let mut outputs: Vec<Output> = Vec::new();
     let mut timings = Vec::new();
@@ -1251,6 +1296,71 @@ mod tests {
         assert_eq!(outcome.ended_by, "done");
         assert_eq!(timings.len(), 1);
         assert!(run(&task, Config::B).is_err());
+    }
+
+    /// V2 changes only the examples and adds one rule. The prompt of the
+    /// model has the system message of the option.
+    #[test]
+    fn the_prompt_v2_has_placeholders_and_the_same_rules() {
+        let examples = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|l| l.starts_with('{'))
+                .map(String::from)
+                .collect()
+        };
+        let rest = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|l| !l.starts_with('{') && !l.starts_with("- Replace each"))
+                .map(String::from)
+                .collect()
+        };
+        assert_eq!(rest(SYSTEM_V2), rest(SYSTEM));
+        assert_eq!(examples(SYSTEM_V2).len(), examples(SYSTEM).len());
+        for line in examples(SYSTEM_V2) {
+            assert!(!line.contains("2500") && !line.contains("_1") && !line.contains("What do"));
+        }
+
+        struct Prompts(Vec<String>);
+        impl Model for Prompts {
+            fn command(
+                &mut self,
+                prompt: &str,
+                seed: u64,
+                state: &Ledger,
+                watch: &mut dyn FnMut(&str),
+            ) -> anyhow::Result<Generation> {
+                self.0.push(prompt.to_string());
+                Script(vec!["{\"cmd\":\"DONE\"}"]).command(prompt, seed, state, watch)
+            }
+        }
+        let task = task_with_request(0);
+        for (prompt, system) in [(Prompt::V1, SYSTEM), (Prompt::V2, SYSTEM_V2)] {
+            let mut model = Prompts(Vec::new());
+            let options = RunOptions {
+                prompt,
+                ..RunOptions::default()
+            };
+            run_task(&mut model, "script", Config::C, &task, 1, &options).expect("run");
+            assert!(model.0[0].contains(system));
+        }
+        let v2 = RunOptions {
+            prompt: Prompt::V2,
+            ..RunOptions::default()
+        };
+        assert!(run_task(&mut Script(vec![]), "script", Config::B, &task, 1, &v2).is_err());
+        let v2_with_workaround = RunOptions {
+            workaround: Some(Workaround::Limits),
+            ..v2
+        };
+        let result = run_task(
+            &mut Script(vec![]),
+            "script",
+            Config::C,
+            &task,
+            1,
+            &v2_with_workaround,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

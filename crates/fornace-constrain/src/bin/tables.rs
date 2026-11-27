@@ -358,6 +358,8 @@ fn label(outcome: &Outcome, file: &str) -> String {
                     label.push_str(&format!(" + stop at {t}"));
                 } else if part == "r" {
                     label.push_str(" + request check");
+                } else if part == "v2" {
+                    label.push_str(" + prompt v2");
                 }
             }
         }

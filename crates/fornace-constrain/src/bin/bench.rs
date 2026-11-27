@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fornace_constrain::bench::{
-    Answer, Config, Generation, MAX_COMMAND_TOKENS, Model, RunOptions, json_end, run_task,
+    Answer, Config, Generation, MAX_COMMAND_TOKENS, Model, Prompt, RunOptions, json_end, run_task,
 };
 use fornace_constrain::compile::{LedgerRules, Rules, lark, lark_requested};
 use fornace_constrain::grammar::{GRAMMAR_B, Grammars};
@@ -72,6 +72,10 @@ struct Args {
     /// and D. The file name gets `-r`.
     #[arg(long)]
     request_check: bool,
+    /// The system message. `v2` has placeholders in the examples, for C and
+    /// D with no workaround. The file name gets `-v2`.
+    #[arg(long, value_enum, default_value = "v1")]
+    prompt: Prompt,
 }
 
 struct EngineModel {
@@ -216,6 +220,12 @@ fn main() -> Result<()> {
         }
         config_name.push_str("-r");
     }
+    if args.prompt == Prompt::V2 {
+        if !matches!(args.config, Config::C | Config::D) || args.workaround.is_some() {
+            bail!("--prompt v2 is for --config c and --config d with no workaround");
+        }
+        config_name.push_str("-v2");
+    }
     let mut stem = format!("{}-{}-{config_name}-{model_name}", today(), commit());
     if let Some(tag) = &args.tag {
         stem.push('-');
@@ -263,6 +273,7 @@ fn main() -> Result<()> {
         faults: args.fault,
         workaround: args.workaround,
         request_check: args.request_check,
+        prompt: args.prompt,
     };
     let (mut runs, mut successes) = (0, 0);
     // The refused commands, and the fault test: selected, changed, stopped.
